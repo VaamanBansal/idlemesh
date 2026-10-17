@@ -1,4 +1,4 @@
-"""Command line: `idlemesh status | serve | nodes | simulate`."""
+"""Command line: `idlemesh status | serve | nodes | ui | simulate`."""
 
 from __future__ import annotations
 
@@ -174,6 +174,14 @@ def cmd_nodes(args: argparse.Namespace) -> None:
         print(f"Also on this network, other meshes: {names}")
 
 
+def cmd_ui(args: argparse.Namespace) -> None:
+    try:
+        from idlemesh.ui.server import serve_ui
+    except ImportError as err:
+        raise SystemExit("the UI needs the networking extras: pip install 'idlemesh[net]'") from err
+    serve_ui(port=args.port, open_browser=not args.no_browser)
+
+
 def cmd_simulate(args: argparse.Namespace) -> None:
     from idlemesh.simulator.simulate import main as sim_main
 
@@ -182,7 +190,7 @@ def cmd_simulate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="idlemesh")
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="{status,serve,nodes,simulate}")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="{status,serve,nodes,ui,simulate}")
     st = sub.add_parser("status", help="show whether this machine is lendable")
     st.set_defaults(f=cmd_status)
     j = sub.add_parser("join")  # Phase 0 command, kept only to point people at serve/nodes
@@ -208,6 +216,10 @@ def main() -> None:
     nd.add_argument("--timeout", type=float, default=3.0, help="seconds to browse (default 3)")
     nd.add_argument("--secret", help="shared mesh secret (default: $IDLEMESH_SECRET)")
     nd.set_defaults(f=cmd_nodes)
+    ui = sub.add_parser("ui", help="open a local web page to lend this laptop and run demos")
+    ui.add_argument("--port", type=int, default=8765, help="local port (default 8765)")
+    ui.add_argument("--no-browser", action="store_true", help="don't open the browser")
+    ui.set_defaults(f=cmd_ui)  # deliberately no --host: the UI only ever binds to 127.0.0.1
     s = sub.add_parser("simulate", help="compare naive vs prediction-aware scheduling")
     s.add_argument("--seed", type=int, default=0)
     s.set_defaults(f=cmd_simulate)
