@@ -18,20 +18,12 @@ def cmd_status(_: argparse.Namespace) -> None:
     print(f"lendable:    {snap.lendable()}")
 
 
-def cmd_join(args: argparse.Namespace) -> None:
-    try:
-        from idlemesh.agent.discovery import advertise
-    except ImportError as err:
-        raise SystemExit("networking extras missing: pip install 'idlemesh[net]'") from err
-    zc, _ = advertise(args.name or socket.gethostname(), args.port)
-    print(f"Advertising on the LAN as '{args.name or socket.gethostname()}'. Ctrl+C to leave.")
-    try:
-        import time
-
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        zc.close()
+def cmd_join(_: argparse.Namespace) -> None:
+    raise SystemExit(
+        "`idlemesh join` has been replaced.\n"
+        "  To lend this laptop:      idlemesh serve   (it advertises itself on the LAN)\n"
+        "  To see laptops near you:  idlemesh nodes"
+    )
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -61,9 +53,9 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("status", help="show whether this machine is lendable")
     st.set_defaults(f=cmd_status)
-    j = sub.add_parser("join", help="advertise this machine on the LAN")
+    j = sub.add_parser("join")  # Phase 0 command, kept only to point people at serve/nodes
     j.add_argument("--name")
-    j.add_argument("--port", type=int, default=7450)
+    j.add_argument("--port")
     j.set_defaults(f=cmd_join)
     sv = sub.add_parser("serve", help="run chunks sent by other laptops")
     sv.add_argument("--port", type=int, default=7450)
