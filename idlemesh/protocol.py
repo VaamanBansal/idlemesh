@@ -20,9 +20,12 @@ from __future__ import annotations
 import hashlib
 import heapq
 import hmac
+import ipaddress
 import logging
+import re
 import secrets
 import struct
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -35,6 +38,42 @@ import cloudpickle
 log = logging.getLogger(__name__)
 
 MAX_AGE_S = 300.0  # reject messages more than 5 minutes old (or in the future)
+PROTOCOL_VERSION = 2  # 1 = Phase 1 (no versions in the handshake); 2 = Phase 2
+DEFAULT_PORT = 7450
+
+_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+)
+
+
+def python_version() -> str:
+    """`major.minor` of this interpreter. cloudpickle needs it to match on both ends."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def parse_node(addr: str) -> tuple[str, int]:
+    """Parse "host" or "host:port" (port defaults to 7450). Raises ValueError if malformed."""
+    if not isinstance(addr, str) or not addr.strip():
+        raise ValueError(f"empty node address: {addr!r}")
+    text = addr.strip()
+    if "://" in text:
+        raise ValueError(f"node address {addr!r} should be host[:port], without a scheme")
+    if text.startswith("[") or text.count(":") > 1:
+        raise ValueError(f"node address {addr!r} looks like IPv6, which isn't supported yet")
+    host, sep, port_s = text.partition(":")
+    port = DEFAULT_PORT
+    if sep:
+        if not port_s.isdigit():
+            raise ValueError(f"node address {addr!r} has an invalid port {port_s!r}")
+        port = int(port_s)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"node address {addr!r} has a port outside 1-65535")
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        if not _HOSTNAME.match(host) or host.replace(".", "").isdigit():
+            raise ValueError(f"node address {addr!r} has an invalid host {host!r}") from None
+    return host, port
 
 
 @dataclass
