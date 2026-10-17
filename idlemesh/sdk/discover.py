@@ -42,14 +42,23 @@ class Candidate:
         return f"{self.host}:{self.port}"
 
 
-def no_agents_hint(mesh: str, other_meshes: set[str]) -> str:
-    hint = (
-        f'No IdleMesh agents found in mesh "{mesh}". Campus and office Wi-Fi often block '
-        'discovery; try a phone hotspot, or pass nodes=["IP:7450"] explicitly.'
-    )
+def no_agents_hint(
+    mesh: str, other_meshes: set[str], mesh_option: str = "mesh=...", saw_own: bool = False
+) -> str:
+    if saw_own:
+        hint = (
+            f'No other IdleMesh agents found in mesh "{mesh}" (only this laptop\'s own agent). '
+            "Is the other laptop running `idlemesh serve` on the same Wi-Fi? If so, the "
+            'network may block discovery between devices; pass nodes=["IP:7450"] explicitly.'
+        )
+    else:
+        hint = (
+            f'No IdleMesh agents found in mesh "{mesh}". Campus and office Wi-Fi often block '
+            'discovery; try a phone hotspot, or pass nodes=["IP:7450"] explicitly.'
+        )
     if other_meshes:
         names = ", ".join(sorted(f'"{m}"' for m in other_meshes))
-        hint += f" (Found agents in other meshes: {names}; pass mesh=... to use them.)"
+        hint += f" (Found agents in other meshes: {names}; use {mesh_option} to pick one.)"
     return hint
 
 
@@ -87,6 +96,7 @@ class Discovery:
         self._warned: set[str] = set()
         self._seen_in_mesh: set[str] = set()  # node IDs of other laptops in our mesh
         self.other_meshes: set[str] = set()
+        self._saw_own = False
         self._started = False
 
     # -- lifecycle -----------------------------------------------------------------
@@ -99,9 +109,9 @@ class Discovery:
         time.sleep(wait_s)
         with self._lock:
             found_nothing = not self._seen_in_mesh
-            others = set(self.other_meshes)
+            others, saw_own = set(self.other_meshes), self._saw_own
         if found_nothing:
-            log.warning(no_agents_hint(self.mesh, others))
+            log.warning(no_agents_hint(self.mesh, others, saw_own=saw_own))
 
     def stop(self) -> None:
         if self._started:
@@ -131,6 +141,7 @@ class Discovery:
             return False
         if advert.node_id == self._own_id or self._own_ips.intersection(advert.addresses):
             log.debug("ignoring this laptop's own agent %s", advert.instance)
+            self._saw_own = True
             return False
         self._seen_in_mesh.add(advert.node_id)
         label = f"agent {advert.node_id} ({advert.addresses[0]}:{advert.port})"
