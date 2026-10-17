@@ -20,6 +20,7 @@ from typing import Any
 
 import zmq
 
+from idlemesh._mp import pool_context
 from idlemesh.agent.discovery import Advertiser, AgentAdvert, make_advert, node_id
 from idlemesh.agent.idle import IdleMonitor
 from idlemesh.protocol import PROTOCOL_VERSION, Codec, MsgType, dumps, loads, python_version
@@ -104,7 +105,7 @@ class Agent:
     def _new_pool(self) -> None:
         if self._pool is not None:
             self._pool.shutdown(wait=False, cancel_futures=True)
-        self._pool = ProcessPoolExecutor(max_workers=self.workers)
+        self._pool = ProcessPoolExecutor(max_workers=self.workers, mp_context=pool_context())
         self._pool_gen += 1
         for f in [self._pool.submit(_noop) for _ in range(self.workers)]:
             f.result()  # spawn workers now, not on the first chunk
