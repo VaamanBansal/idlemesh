@@ -7,7 +7,7 @@ IdleMesh has three roles. Any laptop can play any of them.
 - **Discovery** (`agent/discovery.py`): advertises `_idlemesh._tcp.local.` over mDNS, so peers find each other with no configuration.
 - **Idle monitor** (`agent/idle.py`): decides whether the machine is *lendable*: low CPU load, not on battery, and (Phase 4) no recent keyboard or mouse input.
 - **Activity log + predictor** (`predictor/`): one idle/busy sample per minute, kept locally. The predictor answers `predict_idle(node, duration)`, and only that probability is sent to the coordinator.
-- **Runner** (Phase 1/5): executes chunks, first as a subprocess, later inside Docker with resource limits.
+- **Runner** (`agent/server.py`, `idlemesh serve`): a ZeroMQ ROUTER socket that accepts signed chunks and runs them in a subprocess pool, so a crashing job never takes the agent down. It refuses work when the idle monitor says the machine isn't lendable (unless `--force`). Docker with resource limits comes in Phase 5.
 
 ## Coordinator (the laptop that submits work)
 
