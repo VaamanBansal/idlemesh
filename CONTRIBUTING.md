@@ -5,7 +5,7 @@ Thanks for helping out!
 ## Setup
 
 ```bash
-git clone https://github.com/OWNER/idlemesh.git
+git clone https://github.com/VaamanBansal/idlemesh.git
 cd idlemesh
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"

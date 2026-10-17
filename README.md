@@ -2,7 +2,7 @@
 
 **Borrow your friends' idle laptops over Wi-Fi: zero config, sandboxed, and smart about when they'll need them back.**
 
-[![CI](https://github.com/OWNER/idlemesh/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/idlemesh/actions/workflows/ci.yml)
+[![CI](https://github.com/VaamanBansal/idlemesh/actions/workflows/ci.yml/badge.svg)](https://github.com/VaamanBansal/idlemesh/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-pre--alpha-orange)
@@ -56,7 +56,7 @@ IdleMesh is built around those constraints.
 ## Quickstart
 
 ```bash
-git clone https://github.com/OWNER/idlemesh.git
+git clone https://github.com/VaamanBansal/idlemesh.git
 cd idlemesh
 pip install -e ".[dev]"
 
