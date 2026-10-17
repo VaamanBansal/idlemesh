@@ -31,7 +31,7 @@ Most of the time, most laptops are idle. Tools like Ray and Dask can spread work
 
 - **They come and go.** Lids close, Wi-Fi drops, batteries die.
 - **Their owners come back.** A job must get out of the way the moment someone starts typing.
-- **Hardware is mixed.** One friend has an NVIDIA GPU, one has a MacBook, one has an old ThinkPad.
+- **Hardware is mixed.** One friend has an NVIDIA GPU and 16 GB of RAM, one has a MacBook, one has an old 8 GB ThinkPad.
 - **The network is slow.** Wi-Fi is hundreds of times slower than a GPU's PCIe bus, so remote work only pays off for compute-heavy, data-light tasks.
 
 IdleMesh is built around those constraints.
@@ -47,11 +47,14 @@ IdleMesh is built around those constraints.
 | Simulator | Replays usage traces to measure how much work the predictor saves | ✅ |
 | Credit ledger | Lend compute to earn credits, borrow to spend them; credits set priority | ✅ |
 | Idle detection | CPU load and battery state today; keyboard/mouse idle time next | 🟡 |
+| Memory-aware scheduling | Tasks declare how much RAM they need (`@task(memory="12GB")`); jobs only go to laptops with enough free memory | ⏳ Phase 3 |
+| Memory protection | Caps each job's RAM and pauses or stops it when the owner's own apps need memory back | ⏳ Phase 4 |
 | Zero-config discovery | Laptops find each other over mDNS; nobody types an IP address | 🟡 |
 | Remote execution | Ship chunks to peer laptops | ⏳ Phase 1 |
 | Sandboxing | Docker with CPU, memory and filesystem limits | ⏳ Phase 5 |
 | GPU chunks | CuPy/PyTorch on Linux or WSL2 with NVIDIA | ⏳ Phase 5 |
 | Dashboard | Live view of nodes, chunks, credits and speedup | ⏳ Phase 6 |
+| Shared data cache | Each laptop keeps one in-memory copy of a dataset that many chunks reuse, instead of re-sending it over Wi-Fi | 💭 Later |
 
 ## Quickstart
 
@@ -94,6 +97,23 @@ Results from `idlemesh simulate` (three synthetic laptop routines; two weeks of 
 
 Prediction roughly **halves the work lost to owners reclaiming their laptops**, at the cost of placing somewhat fewer long chunks. The simulator is the place to explore that trade-off.
 
+## Memory-aware scheduling (not RAM sharing)
+
+IdleMesh does **not** let your laptop use a friend's RAM as its own. Over Wi-Fi, a round trip takes milliseconds while local RAM answers in about 100 nanoseconds, so remote memory would be slower than your own SSD.
+
+Instead, IdleMesh **runs the job where the RAM is**. A task declares how much memory it needs, each laptop reports its free RAM, and the scheduler only places the task on machines that can fit it:
+
+```python
+from idlemesh import task
+
+
+@task(memory="12GB")  # planned API: won't be sent to a laptop with less free RAM
+def backtest(params):
+    ...
+```
+
+If your laptop has 8 GB and the job needs 12, it runs on the friend with 16. The agent also caps each job's memory, so a big job can never freeze the owner's laptop.
+
 ## How it works
 
 ```
@@ -130,11 +150,12 @@ tests/
 - [x] **Phase 0:** repo, CI, core data structures
 - [ ] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
 - [ ] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, SQLite-backed queue
-- [ ] **Phase 3:** on-join benchmarking of CPU speed and link bandwidth
-- [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity
+- [ ] **Phase 3:** on-join benchmarking of CPU speed and link bandwidth; nodes report free RAM and the scheduler respects each task's memory requirement
+- [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM
 - [ ] **Phase 4.5:** live activity logging feeding the predictor
 - [ ] **Phase 5:** Docker sandboxing and GPU chunks
 - [ ] **Phase 6:** web dashboard, more examples, PyPI release
+- [ ] **Later:** shared in-memory data cache so chunks reuse datasets instead of re-transferring them
 
 ## How it compares
 
@@ -144,6 +165,7 @@ tests/
 | Setup | Zero config (mDNS) | Head node + config | Admin setup | Project server | Zero config |
 | Owner returns to machine | Pause + predict | Not a concern | Evicts jobs | Pauses | Not a concern |
 | Predicts availability | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Memory-aware placement | ✅ (planned) | ✅ | ✅ | ✅ | ✅ |
 
 IdleMesh doesn't try to replace any of these. If you have a real cluster, use Ray. IdleMesh is for the case where "the cluster" is three laptops in a hostel room.
 
@@ -159,6 +181,7 @@ Contributions are welcome. Look for issues labelled `good first issue`. Some ide
 - A better availability predictor (anything implementing `predict_idle`)
 - Apple Metal support for GPU chunks
 - A terminal UI dashboard
+- Free-RAM reporting and memory-aware placement in the scheduler
 
 Run `ruff check . && ruff format --check . && pytest` before opening a PR.
 
