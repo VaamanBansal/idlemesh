@@ -107,3 +107,15 @@ def test_codec_rejects_wrong_secret_and_tampering():
     tampered[4] = b"evil"
     assert Codec(SECRET).decode(tampered) is None
     assert Codec(SECRET).decode(frames[:5]) is None
+
+
+def test_on_progress_counts_per_node_with_remote_agent(agent):
+    addr, _ = agent()
+    calls = []
+    mesh = Mesh(workers=1, nodes=[addr], secret=SECRET)
+    out = mesh.map(slow_square, range(40), chunk_size=2, on_progress=lambda *a: calls.append(a))
+    assert out == [x * x for x in range(40)]
+    assert [c[0] for c in calls] == list(range(1, 21))  # 20 chunks, one call each, in order
+    assert all(total == 20 for _, total, _ in calls)
+    assert all(sum(per_node.values()) == done for done, _, per_node in calls)
+    assert calls[-1][2] == mesh.last_stats and calls[-1][2].get(addr, 0) > 0

@@ -96,9 +96,16 @@ def _explicit_keys(nodes: list[str]) -> set[str]:
 
 
 class RemoteRun:
-    def __init__(self, mesh: Mesh, discovery: Discovery | None = None) -> None:
+    def __init__(
+        self,
+        mesh: Mesh,
+        discovery: Discovery | None = None,
+        on_progress: Callable[[int, int, dict[str, int]], None] | None = None,
+    ) -> None:
         self.mesh = mesh
         self.discovery = discovery
+        self.on_progress = on_progress
+        self.total = 0
         self.queue = mesh.queue
         self.codec = Codec(mesh.secret)
         self.ctx = zmq.Context.instance()
@@ -166,6 +173,7 @@ class RemoteRun:
     def map(self, fn: Callable[[Any], Any], inputs: list[Any], chunk_size: int) -> list[Any]:
         job_id = uuid.uuid4().hex[:8]
         chunks = split(job_id, fn, list(inputs), chunk_size)
+        self.total = len(chunks)
         self.queue.submit(chunks)
         pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=pool_context())
         try:
@@ -181,6 +189,11 @@ class RemoteRun:
             self.queue.drop_job(job_id)
             self.mesh.last_stats = dict(self.stats)
         return results
+
+    def _count(self, who: str) -> None:
+        self.stats[who] = self.stats.get(who, 0) + 1
+        if self.on_progress is not None:
+            self.on_progress(sum(self.stats.values()), self.total, dict(self.stats))
 
     def _step(self, pool: ProcessPoolExecutor) -> None:
         now = time.monotonic()
@@ -216,7 +229,7 @@ class RemoteRun:
             result = fut.result()  # a local exception propagates, as in local-only mode
             self.est_runtime_s += EWMA * ((time.monotonic() - started) - self.est_runtime_s)
             if self.queue.complete(cid, result, node_id="local"):
-                self.stats["local"] = self.stats.get("local", 0) + 1
+                self._count("local")
 
     # -- remote workers ----------------------------------------------------------
     def _worth_sending(self, chunk: Chunk, node: _Node) -> bool:
@@ -270,7 +283,7 @@ class RemoteRun:
             if node.inflight.pop(msg.chunk_id, None) is None:
                 return
             if self.queue.complete(msg.chunk_id, loads(msg.payload), node_id=node.addr):
-                self.stats[node.addr] = self.stats.get(node.addr, 0) + 1
+                self._count(node.addr)
         elif msg.type is MsgType.ERROR:
             if msg.chunk_id not in node.inflight:
                 return

@@ -80,3 +80,14 @@ def test_simulator_prediction_reduces_waste():
 
     out = main(seed=1)
     assert out["predict"] < out["naive"]
+
+
+def test_on_progress_called_once_per_chunk_locally():
+    calls = []
+    out = Mesh(workers=2).map(
+        square, range(20), chunk_size=6, on_progress=lambda *a: calls.append(a)
+    )
+    assert out == [x * x for x in range(20)]
+    assert [c[0] for c in calls] == [1, 2, 3, 4]  # 4 chunks, one call each
+    assert all(total == 4 for _, total, _ in calls)
+    assert all(per_node == {"local": done} for done, _, per_node in calls)
