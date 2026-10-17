@@ -33,9 +33,20 @@ class ChunkQueue:
         self._leased[chunk.chunk_id] = (chunk, node_id, time.monotonic())
         return chunk
 
-    def complete(self, chunk_id: str, result: list) -> None:
+    def peek(self) -> Chunk | None:
+        """The chunk `lease()` would hand out next, without leasing it."""
+        return self._pending[0] if self._pending else None
+
+    def complete(self, chunk_id: str, result: list, node_id: str | None = None) -> bool:
+        """Record a result. With `node_id`, a result from a node that no longer holds
+        the lease (it was released as dead and the chunk re-run) is ignored."""
+        if node_id is not None:
+            lease = self._leased.get(chunk_id)
+            if lease is None or lease[1] != node_id:
+                return False
         chunk, _, _ = self._leased.pop(chunk_id)
         self._results[chunk.job_id][chunk.index] = result
+        return True
 
     def release_node(self, node_id: str) -> int:
         """Requeue every chunk leased to a node that died or was reclaimed."""
@@ -55,6 +66,13 @@ class ChunkQueue:
 
     def is_done(self, job_id: str, n_chunks: int) -> bool:
         return len(self._results.get(job_id, {})) == n_chunks
+
+    def drop_job(self, job_id: str) -> None:
+        """Forget every pending, leased and finished chunk of a job (e.g. after it failed)."""
+        self._pending = deque(c for c in self._pending if c.job_id != job_id)
+        for cid in [cid for cid, (c, _, _) in self._leased.items() if c.job_id == job_id]:
+            del self._leased[cid]
+        self._results.pop(job_id, None)
 
     def gather(self, job_id: str) -> list:
         parts = self._results[job_id]

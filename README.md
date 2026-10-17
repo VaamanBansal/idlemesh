@@ -20,10 +20,11 @@ def simulate(seed):
     return sum(rng.random() for _ in range(1_000_000))
 
 
-results = Mesh().map(price_paths, range(1_000), chunk_size=10)
+results = Mesh().map(simulate, range(1_000), chunk_size=10)                # this laptop only
+results = Mesh(nodes=["192.168.1.20:7450"]).map(simulate, range(1_000), chunk_size=10)  # + a friend's
 ```
 
-> **Status:** pre-alpha. The core pieces (job chunking, fault-tolerant queue, cost-model scheduler, availability predictor, credit ledger, simulator) work and are tested, but they currently run on **local worker processes**. Remote execution across laptops arrives in Phase 1 of the [roadmap](#roadmap).
+> **Status:** pre-alpha. The core pieces (job chunking, fault-tolerant queue, cost-model scheduler, availability predictor, credit ledger, simulator) work and are tested. **Remote execution works** between laptops on the same LAN; for now you type the other laptop's address (automatic discovery is Phase 2 of the [roadmap](#roadmap)).
 
 ## Why
 
@@ -50,7 +51,7 @@ IdleMesh is built around those constraints.
 | Memory-aware scheduling | Tasks declare how much RAM they need (`@task(memory="12GB")`); jobs only go to laptops with enough free memory | ⏳ Phase 3 |
 | Memory protection | Caps each job's RAM and pauses or stops it when the owner's own apps need memory back | ⏳ Phase 4 |
 | Zero-config discovery | Laptops find each other over mDNS; nobody types an IP address | 🟡 |
-| Remote execution | Ship chunks to peer laptops | ⏳ Phase 1 |
+| Remote execution | Ship chunks to peer laptops over a signed ZeroMQ channel; a lost laptop's chunks are rerun elsewhere | ✅ |
 | Sandboxing | Docker with CPU, memory and filesystem limits | ⏳ Phase 5 |
 | GPU chunks | CuPy/PyTorch on Linux or WSL2 with NVIDIA | ⏳ Phase 5 |
 | Dashboard | Live view of nodes, chunks, credits and speedup | ⏳ Phase 6 |
@@ -68,6 +69,67 @@ idlemesh simulate                        # naive vs prediction-aware scheduling
 python examples/monte_carlo_option.py    # price an option across worker processes
 pytest
 ```
+
+## Try it on two laptops
+
+Both laptops need to be on the same Wi-Fi and have the same shared secret. Anyone with the secret can run code on the agent laptop, so pick a long random one and only share it with people you trust.
+
+**On both laptops:**
+
+```bash
+git clone https://github.com/VaamanBansal/idlemesh.git
+cd idlemesh
+pip install -e ".[net]"
+```
+
+Set the secret in the terminal you'll use (an environment variable keeps it out of your shell history and the process list):
+
+```bash
+export IDLEMESH_SECRET="correct-horse-battery-staple-42"      # macOS / Linux
+$env:IDLEMESH_SECRET = "correct-horse-battery-staple-42"      # Windows PowerShell
+```
+
+**On the friend's laptop (the one lending compute):**
+
+```bash
+idlemesh serve --port 7450
+```
+
+Find its LAN address with `ipconfig` (Windows), `ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux), e.g. `192.168.1.20`. Allow incoming connections on port 7450 if the firewall asks. The agent refuses work while the laptop is busy or on battery; add `--force` to skip that check while testing.
+
+**On your laptop:**
+
+```python
+# remote_demo.py
+import random
+
+from idlemesh import Mesh
+
+
+def simulate(seed):
+    rng = random.Random(seed)
+    return sum(rng.random() for _ in range(2_000_000))
+
+
+if __name__ == "__main__":
+    mesh = Mesh(nodes=["192.168.1.20:7450"])  # reads IDLEMESH_SECRET
+    results = mesh.map(simulate, range(400), chunk_size=10)
+    print(len(results), "results;", "chunks per node:", mesh.last_stats)
+```
+
+```bash
+python remote_demo.py
+```
+
+Chunks run on the friend's laptop and on your own worker processes at the same time, and results come back in input order. If the friend closes the lid, their chunks are rerun on your laptop. If the function raises an exception on the friend's laptop, `map()` raises `idlemesh.protocol.RemoteError` with the remote traceback.
+
+Notes:
+
+- Define your function in the script you run (or in a package installed on both laptops). Functions from other local modules are sent by reference, so the agent must be able to import them; `cloudpickle.register_pickle_by_value(module)` ships a module by value instead.
+- Every message is signed (HMAC-SHA256) and timestamped. If the two laptops' clocks differ by more than 5 minutes, messages are rejected and the agent logs a warning saying so: turn on automatic time sync.
+- Traffic is signed, not encrypted: someone else on the Wi-Fi can read inputs and results, but can't forge or replay jobs.
+
+## LAN discovery (preview)
 
 To try LAN discovery, install the networking extras on two machines on the same Wi-Fi:
 
@@ -133,13 +195,13 @@ See [docs/architecture.md](docs/architecture.md) for details.
 
 ```
 idlemesh/
-  agent/        discovery, idle monitor (sandbox runner coming)
+  agent/        discovery, idle monitor, `serve` agent (sandbox runner coming)
   coordinator/  chunk queue, cost-model scheduler, credit ledger
   predictor/    predict_idle() interface + hour-of-week model
-  sdk/          Mesh.map() and @task
+  sdk/          Mesh.map() and @task; remote.py drives agents + the local pool
   simulator/    trace replay for comparing scheduling policies
-  protocol.py   chunk format and serialization
-  cli.py        idlemesh status | join | simulate
+  protocol.py   chunk format, serialization, signed message codec
+  cli.py        idlemesh status | join | serve | simulate
 examples/       Monte Carlo option pricing
 docs/           architecture and security notes
 tests/
@@ -148,7 +210,7 @@ tests/
 ## Roadmap
 
 - [x] **Phase 0:** repo, CI, core data structures
-- [ ] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
+- [x] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
 - [ ] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, SQLite-backed queue
 - [ ] **Phase 3:** on-join benchmarking of CPU speed and link bandwidth; nodes report free RAM and the scheduler respects each task's memory requirement
 - [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM
@@ -171,7 +233,7 @@ IdleMesh doesn't try to replace any of these. If you have a real cluster, use Ra
 
 ## Security
 
-IdleMesh ships Python functions between machines with `cloudpickle`. **Unpickling runs code**, so only join a mesh with people you trust. Docker sandboxing (Phase 5) adds a second layer. See [docs/security.md](docs/security.md).
+IdleMesh ships Python functions between machines with `cloudpickle`. **Unpickling runs code**, so only join a mesh with people you trust. Every message is signed with the mesh's shared secret (HMAC-SHA256), checked for age and replay, and verified *before* anything is unpickled. Docker sandboxing (Phase 5) adds a second layer. See [docs/security.md](docs/security.md).
 
 ## Contributing
 
