@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import threading
 import time
 import traceback
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -74,6 +75,9 @@ class Agent:
         self.advertise = advertise
         self.node_id = node_id(create=True)
         self._warned_python: set[str] = set()
+        self._stop = threading.Event()
+        self.started = threading.Event()  # set once listening (for in-process callers)
+        self.chunks_served = 0  # chunks this agent has finished for others
         self.codec = Codec(secret)
         self.workers = workers or os.cpu_count() or 2
         self.force = force
@@ -119,25 +123,30 @@ class Agent:
             return self._pool.submit(_run_blob, blob)
 
     # -- main loop ---------------------------------------------------------------
+    def stop(self) -> None:
+        """Ask serve_forever() (running in another thread) to shut down cleanly."""
+        self._stop.set()
+
     def serve_forever(self) -> None:
         ctx = zmq.Context.instance()
         sock = ctx.socket(zmq.ROUTER)
         sock.setsockopt(zmq.LINGER, 0)
-        sock.bind(f"tcp://{self.host}:{self.port}")
-        self._new_pool()
-        self.lendable()
         advertiser = None
-        if self.advertise:
-            advertiser = Advertiser(self.advert())
-            advertiser.start()
-        print(
-            f"idlemesh agent '{self.name}' (id {self.node_id}) listening on "
-            f"tcp://{self.host}:{self.port} (workers={self.workers}, force={self.force}, "
-            f"mesh={self.mesh!r}, advertised={'yes' if advertiser else 'no'})",
-            flush=True,
-        )
         try:
-            while True:
+            sock.bind(f"tcp://{self.host}:{self.port}")
+            self._new_pool()
+            self.lendable()
+            if self.advertise:
+                advertiser = Advertiser(self.advert())
+                advertiser.start()
+            print(
+                f"idlemesh agent '{self.name}' (id {self.node_id}) listening on "
+                f"tcp://{self.host}:{self.port} (workers={self.workers}, force={self.force}, "
+                f"mesh={self.mesh!r}, advertised={'yes' if advertiser else 'no'})",
+                flush=True,
+            )
+            self.started.set()
+            while not self._stop.is_set():
                 if sock.poll(50):
                     while True:
                         try:
@@ -207,6 +216,7 @@ class Agent:
             exc = fut.exception()
             if exc is None:
                 ok, blob = fut.result()
+                self.chunks_served += ok
                 mtype = MsgType.RESULT if ok else MsgType.ERROR
                 sock.send_multipart([ident, *self.codec.encode(mtype, cid, blob)])
                 continue

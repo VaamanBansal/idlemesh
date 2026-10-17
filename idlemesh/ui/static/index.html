@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IdleMesh</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>IdleMesh</h1>
+    <span id="conn" class="pill">connecting…</span>
+  </header>
+
+  <main>
+    <section aria-labelledby="h-setup">
+      <h2 id="h-setup">Setup</h2>
+      <form id="setup-form" class="row" autocomplete="off">
+        <label>Shared secret
+          <input id="secret" type="password" autocomplete="new-password" placeholder="same on every laptop">
+        </label>
+        <label>Mesh name
+          <input id="mesh" type="text" value="default" maxlength="63" spellcheck="false">
+        </label>
+        <button type="submit">Save</button>
+        <span id="secret-status" class="muted"></span>
+      </form>
+      <p id="setup-note" class="note"></p>
+    </section>
+
+    <section aria-labelledby="h-lend">
+      <h2 id="h-lend">Lend this laptop</h2>
+      <div class="row">
+        <label class="switch">
+          <input id="lend-toggle" type="checkbox" role="switch">
+          <span id="lend-label">Off</span>
+        </label>
+        <label>Workers <output id="workers-out">-</output>
+          <input id="workers" type="range" min="1" max="1" value="1">
+        </label>
+        <label class="check"><input id="force" type="checkbox"> Force (ignore the lendable check, for testing)</label>
+      </div>
+      <p class="muted">This laptop: <span id="ips">-</span> · Python <span id="python">-</span>
+        · chunks run for others: <strong id="served">0</strong></p>
+      <p id="firewall-hint" class="note info" hidden></p>
+      <p id="lend-note" class="note"></p>
+    </section>
+
+    <section aria-labelledby="h-peers">
+      <h2 id="h-peers">Laptops found</h2>
+      <form id="peer-form" class="row" autocomplete="off">
+        <label>Add by IP
+          <input id="peer-address" type="text" placeholder="192.168.1.20 or 192.168.1.20:7450" spellcheck="false">
+        </label>
+        <button type="submit">Add</button>
+      </form>
+      <p id="peer-note" class="note"></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Address</th><th>Workers</th><th>Python</th><th>Lendable</th><th>Latency</th><th>Status</th><th></th></tr></thead>
+          <tbody id="peers"></tbody>
+        </table>
+      </div>
+      <p id="peers-empty" class="muted">No laptops found yet. On the other laptop, run <code>idlemesh ui</code> and switch on "Lend this laptop" (same secret and mesh). If nothing shows up, your network may block discovery: add it by IP.</p>
+    </section>
+
+    <section aria-labelledby="h-run">
+      <h2 id="h-run">Run a demo</h2>
+      <div id="demos" class="choices" role="radiogroup" aria-label="Demo"></div>
+      <div class="row">
+        <label>Size
+          <select id="size"></select>
+        </label>
+        <label>Where
+          <select id="mode">
+            <option value="local">This laptop only</option>
+            <option value="mesh">With found laptops</option>
+            <option value="compare" selected>Compare both</option>
+          </select>
+        </label>
+        <button id="run" type="button" class="primary">Run</button>
+      </div>
+      <p id="run-note" class="note"></p>
+    </section>
+
+    <section aria-labelledby="h-progress">
+      <h2 id="h-progress">Live progress</h2>
+      <p id="progress-idle" class="muted">Nothing has run yet.</p>
+      <div id="progress" hidden>
+        <p><strong id="run-title"></strong> <span id="run-phase" class="muted"></span></p>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar"><div id="bar-fill"></div></div>
+        <p class="muted"><span id="run-count"></span> · <span id="run-elapsed"></span></p>
+        <ul id="per-node" class="per-node"></ul>
+        <div id="run-result" hidden>
+          <table class="result">
+            <tbody id="result-rows"></tbody>
+          </table>
+          <p id="run-answer"></p>
+        </div>
+        <p id="run-error" class="note bad" hidden></p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-log">
+      <h2 id="h-log">Log</h2>
+      <ol id="log" class="log"></ol>
+    </section>
+  </main>
+</body>
+</html>

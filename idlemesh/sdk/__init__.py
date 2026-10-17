@@ -15,7 +15,7 @@ import os
 import uuid
 import weakref
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
 from idlemesh.coordinator.queue import ChunkQueue
@@ -25,6 +25,9 @@ from idlemesh.protocol import Chunk, dumps, loads, parse_node, split
 if TYPE_CHECKING:
     from idlemesh.agent.discovery import Browser
     from idlemesh.sdk.discover import Discovery
+
+
+ProgressCallback = Callable[[int, int, dict[str, int]], None]  # (done, total, per_node)
 
 
 def _run_serialized(blob: bytes) -> list[Any]:
@@ -114,14 +117,25 @@ class Mesh:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def map(self, fn: Callable[[Any], Any], inputs: list[Any], chunk_size: int = 100) -> list[Any]:
+    def map(
+        self,
+        fn: Callable[[Any], Any],
+        inputs: list[Any],
+        chunk_size: int = 100,
+        on_progress: ProgressCallback | None = None,
+    ) -> list[Any]:
+        """Apply `fn` to every input; results come back in input order.
+
+        on_progress(done, total, per_node) is called after each chunk completes, with
+        chunk counts; per_node maps "local" or a node's "host:port" to chunks it ran.
+        """
         if self.nodes or self.discover:
             try:
                 from idlemesh.sdk.remote import RemoteRun
             except ImportError as err:
                 raise ImportError("remote nodes need pyzmq: pip install 'idlemesh[net]'") from err
             discovery = self.discovery() if self.discover else None
-            return RemoteRun(self, discovery).map(fn, inputs, chunk_size)
+            return RemoteRun(self, discovery, on_progress).map(fn, inputs, chunk_size)
         job_id = uuid.uuid4().hex[:8]
         chunks = split(job_id, fn, list(inputs), chunk_size)
         self.queue.submit(chunks)
@@ -129,8 +143,14 @@ class Mesh:
             futures = {}
             while (c := self.queue.lease("local")) is not None:
                 futures[c.chunk_id] = pool.submit(_run_serialized, dumps(c))
-            for cid, fut in futures.items():
-                self.queue.complete(cid, fut.result())
+            if on_progress is None:
+                for cid, fut in futures.items():
+                    self.queue.complete(cid, fut.result())
+            else:
+                cids = {fut: cid for cid, fut in futures.items()}
+                for done, fut in enumerate(as_completed(cids), start=1):
+                    self.queue.complete(cids[fut], fut.result())
+                    on_progress(done, len(chunks), {"local": done})
         return self.queue.gather(job_id)
 
 

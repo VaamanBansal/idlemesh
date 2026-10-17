@@ -54,7 +54,8 @@ IdleMesh is built around those constraints.
 | Remote execution | Ship chunks to peer laptops over a signed ZeroMQ channel; a lost laptop's chunks are rerun elsewhere | ✅ |
 | Sandboxing | Docker with CPU, memory and filesystem limits | ⏳ Phase 5 |
 | GPU chunks | CuPy/PyTorch on Linux or WSL2 with NVIDIA | ⏳ Phase 5 |
-| Dashboard | Live view of nodes, chunks, credits and speedup | ⏳ Phase 6 |
+| Testing UI | `idlemesh ui`: lend this laptop, see laptops found, run built-in demos and watch chunks split between laptops live | ✅ |
+| Dashboard | Fuller view with credits, history and charts | ⏳ Phase 6 |
 | Shared data cache | Each laptop keeps one in-memory copy of a dataset that many chunks reuse, instead of re-sending it over Wi-Fi | 💭 Later |
 
 ## Quickstart
@@ -81,6 +82,32 @@ git clone https://github.com/VaamanBansal/idlemesh.git
 cd idlemesh
 pip install -e ".[net]"
 ```
+
+### Testing with the UI
+
+The quickest way to try two laptops is the built-in web page. It runs on each laptop, only for the person sitting at it (it listens on `127.0.0.1`, never on the Wi-Fi).
+
+**On both laptops**, after installing as above:
+
+```bash
+idlemesh ui
+```
+
+Your browser opens the page. If it doesn't, open the link printed in the terminal (it contains a private token; don't share it).
+
+1. **Both:** type the same shared secret in **Setup** and press **Save**. Leave the mesh name as `default` unless your group uses its own.
+2. **Your friend:** switch on **Lend this laptop**. (If Windows asks about the firewall, click **Allow** for private networks.)
+3. **You:** wait for your friend's laptop to show up under **Laptops found** as *compatible*. If it doesn't appear, your Wi-Fi may block discovery: type their IP into **Add by IP**.
+4. **You:** pick a demo (option pricing, backtest sweep or ML hyperparameter search) and a size, choose **Compare both**, and press **Run**.
+
+You'll see a live progress bar and per-laptop chunk counts. When it finishes, the page shows both times, the speedup, whether the results matched, and the demo's answer.
+
+![The idlemesh ui page during a two-laptop run](docs/images/ui.png)
+<!-- TODO: replace docs/images/ui.png with a screenshot from a real two-laptop "Compare both" run. -->
+
+The ML demo needs scikit-learn on **every** laptop (`pip install scikit-learn`); the page shows it greyed out until it's installed. The secret you type stays in memory: it isn't saved to disk, logged, or shown on the page again.
+
+The rest of this section does the same thing from the command line and from Python.
 
 Set the secret in the terminal you'll use (an environment variable keeps it out of your shell history and the process list):
 
@@ -217,10 +244,12 @@ idlemesh/
   predictor/    predict_idle() interface + hour-of-week model
   sdk/          Mesh.map() and @task; remote.py drives agents + the local pool;
                 discover.py decides which discovered agents to use
+  demos/        built-in workloads (option, backtest, ml) shared by the UI and examples
+  ui/           `idlemesh ui`: local web page (FastAPI + plain HTML/JS)
   simulator/    trace replay for comparing scheduling policies
   protocol.py   chunk format, serialization, signed message codec
-  cli.py        idlemesh status | serve | nodes | simulate
-examples/       Monte Carlo option pricing
+  cli.py        idlemesh status | serve | nodes | ui | simulate
+examples/       option pricing, backtest sweep, ML hyperparameter search
 docs/           architecture and security notes
 tests/
 ```
@@ -234,7 +263,8 @@ tests/
 - [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM
 - [ ] **Phase 4.5:** live activity logging feeding the predictor
 - [ ] **Phase 5:** Docker sandboxing and GPU chunks
-- [ ] **Phase 6:** web dashboard, more examples, PyPI release
+- [x] Basic testing UI (`idlemesh ui`)
+- [ ] **Phase 6:** fuller web dashboard (credits, history, charts), more examples, PyPI release
 - [ ] **Later:** shared in-memory data cache so chunks reuse datasets instead of re-transferring them
 - [ ] **Later:** SQLite-backed queue (deferred: `map()` runs in-process, so there's nothing to persist yet)
 
