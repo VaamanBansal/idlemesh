@@ -22,6 +22,10 @@ IdleMesh has three roles. Any laptop can play any of them.
   With a predictor attached, a remote node's cost becomes `time / P(stays idle)`, the expected time including retries if the node gets reclaimed (geometric model). A small `risk_floor` stops a single unlucky estimate from excluding a node forever.
 - **Ledger** (`coordinator/ledger.py`): compute-seconds donated minus compute-seconds borrowed. Priority is proportional to balance, with a floor so nobody starves.
 
+## Testing UI
+
+`idlemesh ui` (`ui/`) is a FastAPI app on 127.0.0.1 serving one plain HTML/JS page. `UIState` holds everything in memory: the secret, an in-process `Agent` for "Lend this laptop", a prober that pings each found laptop with the secret every few seconds (name, lendable, latency, compatibility), and the current demo run, which calls `Mesh.map(..., on_progress=...)` from a background thread. The page gets full state snapshots over server-sent events, so it recovers after a restart. Demos live in `demos/` and are imported, not shipped, so agents only need `idlemesh` installed.
+
 ## SDK
 
 `Mesh.map(fn, inputs, chunk_size)` and the `@task` decorator. `Mesh()` uses the local process pool; `Mesh(nodes=[...])` adds agents at known addresses; `Mesh(discover=True)` adds agents found over mDNS.
