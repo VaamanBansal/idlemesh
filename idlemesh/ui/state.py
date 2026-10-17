@@ -74,6 +74,7 @@ class UIState:
         agent_port: int = 7450,
         advertise: bool = True,
         probe_interval: float = 3.0,
+        local_workers: int | None = None,  # worker processes on this laptop (default: all CPUs)
     ) -> None:
         self._lock = threading.RLock()
         self._secret: str | None = None  # memory only; never in snapshot(), logs or disk
@@ -81,6 +82,7 @@ class UIState:
         self.agent_port = agent_port
         self.advertise = advertise
         self.probe_interval = probe_interval
+        self.local_workers = local_workers
         self.cpus = os.cpu_count() or 1
         # lending
         self._agent = None
@@ -422,7 +424,8 @@ class UIState:
                     with self._lock:
                         run.update(done=done, total=total, per_node=rows)
 
-                mesh = Mesh() if phase == "local" else Mesh(nodes=nodes, secret=secret)
+                w = self.local_workers
+                mesh = Mesh(w) if phase == "local" else Mesh(w, nodes=nodes, secret=secret)
                 t0 = time.perf_counter()
                 results = mesh.map(
                     demo.fn, inputs, chunk_size=demo.chunk_size, on_progress=progress

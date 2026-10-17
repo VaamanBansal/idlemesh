@@ -189,15 +189,22 @@ def load_token() -> str:
     return token
 
 
-def serve_ui(port: int = 8765, open_browser: bool = True) -> None:
+def make_server(state: UIState, token: str, port: int):
+    """The uvicorn server `idlemesh ui` runs: always 127.0.0.1, no access log."""
     import uvicorn
 
+    config = uvicorn.Config(
+        create_app(state, token), host=HOST, port=port, access_log=False, log_level="warning"
+    )
+    return uvicorn.Server(config)
+
+
+def serve_ui(port: int = 8765, open_browser: bool = True) -> None:
     # The UI runs worker pools from a process that also runs threads (web server,
     # ZeroMQ, zeroconf); fork() there can deadlock, so use forkserver where fork is
     # the default (Linux before Python 3.14).
-    if multiprocessing.get_start_method(allow_none=True) in (None, "fork"):
-        if multiprocessing.get_context().get_start_method() == "fork":
-            multiprocessing.set_start_method("forkserver", force=True)
+    if multiprocessing.get_context().get_start_method() == "fork":
+        multiprocessing.set_start_method("forkserver", force=True)
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     token = load_token()
@@ -208,10 +215,7 @@ def serve_ui(port: int = 8765, open_browser: bool = True) -> None:
     except ImportError:
         browser = None
     state = UIState(browser=browser)
-    config = uvicorn.Config(
-        create_app(state, token), host=HOST, port=port, access_log=False, log_level="warning"
-    )
-    server = uvicorn.Server(config)
+    server = make_server(state, token, port)
     url = f"http://{HOST}:{port}/?token={token}"
     print(f"IdleMesh UI: {url}", flush=True)
     print("Open that link if your browser doesn't open by itself. Ctrl+C to stop.", flush=True)
