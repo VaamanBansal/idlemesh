@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import zmq
 
+from idlemesh._mp import pool_context
 from idlemesh.coordinator.scheduler import NodeInfo
 from idlemesh.protocol import (
     PROTOCOL_VERSION,
@@ -166,7 +167,7 @@ class RemoteRun:
         job_id = uuid.uuid4().hex[:8]
         chunks = split(job_id, fn, list(inputs), chunk_size)
         self.queue.submit(chunks)
-        pool = ProcessPoolExecutor(max_workers=self.mesh.workers)
+        pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=pool_context())
         try:
             self._connect()
             while not self.queue.is_done(job_id, len(chunks)):
