@@ -20,7 +20,7 @@ from typing import Any
 
 import zmq
 
-from idlemesh.agent.discovery import Advertiser, make_advert, node_id
+from idlemesh.agent.discovery import Advertiser, AgentAdvert, make_advert, node_id
 from idlemesh.agent.idle import IdleMonitor
 from idlemesh.protocol import PROTOCOL_VERSION, Codec, MsgType, dumps, loads, python_version
 
@@ -84,6 +84,10 @@ class Agent:
         # future -> (router identity, chunk_id, pool generation)
         self._running: dict[Future, tuple[bytes, str, int]] = {}
 
+    def advert(self) -> AgentAdvert:
+        """What this agent broadcasts over mDNS. Deliberately excludes name and lendable."""
+        return make_advert(self.port, self.mesh, self.workers)
+
     # -- lendability -------------------------------------------------------------
     def lendable(self) -> bool:
         """Whether this machine may take work. Only re-measured while the agent is idle:
@@ -123,7 +127,7 @@ class Agent:
         self.lendable()
         advertiser = None
         if self.advertise:
-            advertiser = Advertiser(make_advert(self.port, self.mesh, self.workers))
+            advertiser = Advertiser(self.advert())
             advertiser.start()
         print(
             f"idlemesh agent '{self.name}' (id {self.node_id}) listening on "

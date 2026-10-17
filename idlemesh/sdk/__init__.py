@@ -1,7 +1,8 @@
 """User-facing API.
 
     mesh = Mesh()                                        # local worker processes only
-    mesh = Mesh(nodes=["192.168.1.20:7450"], secret=s)   # plus agents on other laptops
+    mesh = Mesh(discover=True)                           # + agents found on the LAN
+    mesh = Mesh(nodes=["192.168.1.20:7450"], secret=s)   # + agents at known addresses
     results = mesh.map(price_path, seeds, chunk_size=1000)
 
 With nodes, chunks run on the remote agents and the local process pool at the
@@ -12,13 +13,18 @@ from __future__ import annotations
 
 import os
 import uuid
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from idlemesh.coordinator.queue import ChunkQueue
 from idlemesh.coordinator.scheduler import Scheduler
-from idlemesh.protocol import Chunk, dumps, loads, split
+from idlemesh.protocol import Chunk, dumps, loads, parse_node, split
+
+if TYPE_CHECKING:
+    from idlemesh.agent.discovery import Browser
+    from idlemesh.sdk.discover import Discovery
 
 
 def _run_serialized(blob: bytes) -> list[Any]:
@@ -39,9 +45,17 @@ class Mesh:
         chunk_timeout: float | None = None,
         scheduler: Scheduler | None = None,
         remote_slowdown_limit: float = 2.0,
+        discover: bool = False,
+        mesh: str | None = None,
+        discover_timeout: float = 2.0,
+        browser: Browser | None = None,
     ) -> None:
         """
-        nodes: "host:port" of agents started with `idlemesh serve`.
+        nodes: "host[:port]" of agents started with `idlemesh serve` (port defaults to 7450).
+        discover: also find agents on the LAN over mDNS, before and during each map().
+        mesh: only use discovered agents in this mesh (default: $IDLEMESH_MESH or "default").
+        discover_timeout: how long the first map() browses before it starts.
+        browser: custom advertisement source (tests); defaults to zeroconf.
         secret: shared mesh secret; defaults to the IDLEMESH_SECRET env var.
         inflight_per_node: chunks queued on each node (default: its workers + 1).
         node_timeout: release a node's chunks after this long without any reply.
@@ -51,9 +65,15 @@ class Mesh:
         """
         self.workers = workers or os.cpu_count() or 2
         self.queue = ChunkQueue()
-        self.nodes = list(nodes or [])
+        self.nodes = [f"{h}:{p}" for h, p in (parse_node(n) for n in (nodes or []))]
+        self.discover = discover
+        self.mesh_name = mesh or os.environ.get("IDLEMESH_MESH") or "default"
+        self.discover_timeout = discover_timeout
+        self._browser = browser
+        self._discovery: Discovery | None = None
+        self._warned: set[str] = set()  # handshake warnings already shown by this Mesh
         self.secret = secret or os.environ.get("IDLEMESH_SECRET")
-        if self.nodes and not self.secret:
+        if (self.nodes or discover) and not self.secret:
             raise ValueError("remote nodes need a shared secret: secret=... or IDLEMESH_SECRET")
         self.inflight_per_node = inflight_per_node
         self.node_timeout = node_timeout
@@ -64,13 +84,44 @@ class Mesh:
         self.remote_slowdown_limit = remote_slowdown_limit
         self.last_stats: dict[str, int] = {}  # node -> chunks it completed in the last map()
 
+    def discovery(self) -> Discovery:
+        """The LAN browser, started on first use and kept running until close()."""
+        if self._discovery is None:
+            from idlemesh.sdk.discover import Discovery
+
+            browser = self._browser
+            if browser is None:
+                try:
+                    import zeroconf  # noqa: F401
+                except ImportError as err:
+                    raise ImportError("discovery needs: pip install 'idlemesh[net]'") from err
+                from idlemesh.agent.discovery import ZeroconfBrowser
+
+                browser = ZeroconfBrowser()
+            self._discovery = Discovery(browser, self.mesh_name)
+            weakref.finalize(self, self._discovery.stop)
+        self._discovery.ensure_started(self.discover_timeout)
+        return self._discovery
+
+    def close(self) -> None:
+        """Stop LAN discovery (only needed with discover=True)."""
+        if self._discovery is not None:
+            self._discovery.stop()
+
+    def __enter__(self) -> Mesh:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def map(self, fn: Callable[[Any], Any], inputs: list[Any], chunk_size: int = 100) -> list[Any]:
-        if self.nodes:
+        if self.nodes or self.discover:
             try:
                 from idlemesh.sdk.remote import RemoteRun
             except ImportError as err:
                 raise ImportError("remote nodes need pyzmq: pip install 'idlemesh[net]'") from err
-            return RemoteRun(self).map(fn, inputs, chunk_size)
+            discovery = self.discovery() if self.discover else None
+            return RemoteRun(self, discovery).map(fn, inputs, chunk_size)
         job_id = uuid.uuid4().hex[:8]
         chunks = split(job_id, fn, list(inputs), chunk_size)
         self.queue.submit(chunks)

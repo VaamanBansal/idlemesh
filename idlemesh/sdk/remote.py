@@ -13,7 +13,9 @@ A remote ERROR fails the whole job with the agent-side traceback (no retry).
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import logging
+import socket
 import time
 import uuid
 from collections.abc import Callable
@@ -24,10 +26,24 @@ from typing import TYPE_CHECKING, Any
 import zmq
 
 from idlemesh.coordinator.scheduler import NodeInfo
-from idlemesh.protocol import Chunk, Codec, Message, MsgType, RemoteError, dumps, loads, split
+from idlemesh.protocol import (
+    PROTOCOL_VERSION,
+    Chunk,
+    Codec,
+    Message,
+    MsgType,
+    RemoteError,
+    dumps,
+    loads,
+    parse_node,
+    python_version,
+    split,
+)
+from idlemesh.sdk.discover import protocol_mismatch, python_mismatch
 
 if TYPE_CHECKING:
     from idlemesh.sdk import Mesh
+    from idlemesh.sdk.discover import Discovery
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +64,14 @@ class _Node:
     last_heard: float = 0.0
     last_ping: float = 0.0
     paused_until: float = 0.0
+    name: str = ""  # the agent's real name; only known after the signed PONG
+    node_id: str = ""
     pings: dict[str, float] = field(default_factory=dict)  # ping id -> sent at
     inflight: dict[str, float] = field(default_factory=dict)  # chunk_id -> sent at
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.addr})" if self.name else self.addr
 
 
 def _run_serialized(blob: bytes) -> list[Any]:
@@ -57,9 +79,25 @@ def _run_serialized(blob: bytes) -> list[Any]:
     return chunk.run()
 
 
+def _explicit_keys(nodes: list[str]) -> set[str]:
+    """Explicit node addresses, plus their resolved IPs, for de-duplicating discoveries."""
+    keys = set(nodes)
+    for addr in nodes:
+        host, port = parse_node(addr)
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            try:
+                keys.add(f"{socket.gethostbyname(host)}:{port}")
+            except OSError:
+                pass
+    return keys
+
+
 class RemoteRun:
-    def __init__(self, mesh: Mesh) -> None:
+    def __init__(self, mesh: Mesh, discovery: Discovery | None = None) -> None:
         self.mesh = mesh
+        self.discovery = discovery
         self.queue = mesh.queue
         self.codec = Codec(mesh.secret)
         self.ctx = zmq.Context.instance()
@@ -67,17 +105,39 @@ class RemoteRun:
         self.nodes: list[_Node] = []
         self.local: dict[Future, tuple[str, float]] = {}  # future -> (chunk_id, started)
         self.stats: dict[str, int] = {}
+        self._explicit = _explicit_keys(mesh.nodes) if discovery else set(mesh.nodes)
+        self._tried: dict[str, int] = {}  # discovered addr -> advert generation we dialled
 
     # -- setup / teardown --------------------------------------------------------
     def _connect(self) -> None:
         now = time.monotonic()
         for addr in self.mesh.nodes:
-            sock = self.ctx.socket(zmq.DEALER)
-            sock.setsockopt(zmq.LINGER, 0)
-            sock.connect(f"tcp://{addr}")
-            node = _Node(addr, sock, started=now, last_heard=now)
-            self.nodes.append(node)
-            self._ping(node, now)
+            self._open(addr, now)
+        self._add_discovered(now)
+
+    def _open(self, addr: str, now: float) -> _Node:
+        sock = self.ctx.socket(zmq.DEALER)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://{addr}")
+        node = _Node(addr, sock, started=now, last_heard=now)
+        self.nodes.append(node)
+        self._ping(node, now)
+        return node
+
+    def _add_discovered(self, now: float) -> None:
+        """Dial agents discovery found since the last step (including mid-job arrivals).
+        An address that failed is only retried after its advertisement reappears."""
+        if self.discovery is None:
+            return
+        alive = {n.addr for n in self.nodes if n.alive}
+        for cand in self.discovery.candidates():
+            addr = cand.addr
+            if addr in self._explicit or addr in alive or self._tried.get(addr) == cand.gen:
+                continue
+            self._tried[addr] = cand.gen
+            node = self._open(addr, now)
+            node.node_id = cand.advert.node_id
+            log.info("discovered agent %s at %s", cand.advert.node_id, addr)
 
     def _close(self, node: _Node) -> None:
         node.alive = False
@@ -87,13 +147,19 @@ class RemoteRun:
         pid = "ping-" + uuid.uuid4().hex[:8]
         node.pings[pid] = now
         node.last_ping = now
-        node.sock.send_multipart(self.codec.encode(MsgType.PING, pid))
+        hello = {"python": python_version(), "protocol": PROTOCOL_VERSION}
+        node.sock.send_multipart(self.codec.encode(MsgType.PING, pid, dumps(hello)))
 
     def _release(self, node: _Node, why: str) -> None:
         n = self.queue.release_node(node.addr)
         node.inflight.clear()
-        log.warning("node %s %s; requeued %d chunk(s)", node.addr, why, n)
+        log.warning("node %s %s; requeued %d chunk(s)", node.label, why, n)
         self._close(node)
+
+    def _warn_once(self, key: str, message: str) -> None:
+        if key not in self.mesh._warned:
+            self.mesh._warned.add(key)
+            log.warning(message)
 
     # -- main entry --------------------------------------------------------------
     def map(self, fn: Callable[[Any], Any], inputs: list[Any], chunk_size: int) -> list[Any]:
@@ -117,6 +183,7 @@ class RemoteRun:
 
     def _step(self, pool: ProcessPoolExecutor) -> None:
         now = time.monotonic()
+        self._add_discovered(now)
         self._fill_local(pool)
         self._fill_remote(now)
         live = [n for n in self.nodes if n.alive]
@@ -194,11 +261,8 @@ class RemoteRun:
                 return
             node.rtt_s += EWMA * ((now - sent) - node.rtt_s) if node.ready else (now - sent)
             info = loads(msg.payload)
-            if not node.ready:
-                node.ready = True
-                node.workers = max(int(info.get("workers", 1)), 1)
-                node.capacity = self.mesh.inflight_per_node or node.workers + 1
-                log.info("node %s ready (%d workers)", node.addr, node.workers)
+            if not node.ready and not self._handshake(node, info):
+                return
             if not info.get("lendable", True):
                 node.paused_until = now + REFUSED_BACKOFF_S
         elif msg.type is MsgType.RESULT:
@@ -216,11 +280,38 @@ class RemoteRun:
                 return
             self._raise_remote(node, msg.chunk_id, err)
 
+    def _handshake(self, node: _Node, info: dict) -> bool:
+        """First PONG: check versions, learn the agent's name. False = node not used."""
+        node.name = str(info.get("name") or "")
+        node.node_id = str(info.get("node_id") or node.node_id)
+        protocol = int(info.get("protocol", 1))  # Phase 1 agents didn't send one
+        theirs = str(info.get("python", ""))
+        if protocol != PROTOCOL_VERSION:
+            self._warn_once(f"{node.addr}:proto", protocol_mismatch(node.label, protocol))
+            self._close(node)
+            return False
+        if theirs != python_version():
+            self._warn_once(f"{node.addr}:py:{theirs}", python_mismatch(node.label, theirs))
+            self._close(node)
+            return False
+        port = node.addr.rsplit(":", 1)[1]
+        for other in self.nodes:
+            same_agent = other.node_id == node.node_id and other.addr.rsplit(":", 1)[1] == port
+            if other is not node and other.alive and other.ready and same_agent:
+                log.info("%s is the same agent as %s; using one connection", node.addr, other.addr)
+                self._close(node)
+                return False
+        node.ready = True
+        node.workers = max(int(info.get("workers", 1)), 1)
+        node.capacity = self.mesh.inflight_per_node or node.workers + 1
+        log.info("node %s ready (%d workers)", node.label, node.workers)
+        return True
+
     def _release_refused(self, node: _Node, now: float) -> None:
         n = self.queue.release_node(node.addr)
         node.inflight.clear()
         node.paused_until = now + REFUSED_BACKOFF_S
-        log.info("node %s is busy; requeued %d chunk(s), retrying it later", node.addr, n)
+        log.info("node %s is busy; requeued %d chunk(s), retrying it later", node.label, n)
 
     def _raise_remote(self, node: _Node, chunk_id: str, err: dict) -> None:
         cause = None
@@ -230,7 +321,7 @@ class RemoteRun:
             except Exception:  # exception type not importable here; the traceback still is
                 cause = None
         tb = err.get("traceback", "")
-        message = f"chunk {chunk_id} failed on {node.addr}: {err.get('message', '')}"
+        message = f"chunk {chunk_id} failed on {node.label}: {err.get('message', '')}"
         if tb:
             message += f"\n\nRemote traceback:\n{tb}"
         raise RemoteError(message, tb) from cause
@@ -241,10 +332,11 @@ class RemoteRun:
                 continue
             if not node.ready:
                 if now - node.started > self.mesh.handshake_timeout:
+                    who = f"agent {node.node_id} at {node.addr}" if node.node_id else node.addr
                     log.warning(
                         "node %s did not answer the handshake (unreachable, not running "
                         "`idlemesh serve`, or a different secret); running without it",
-                        node.addr,
+                        who,
                     )
                     self._close(node)
                 continue

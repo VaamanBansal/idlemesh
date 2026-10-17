@@ -2,9 +2,6 @@
 
 import logging
 import os
-import queue
-import socket
-import subprocess
 import sys
 import threading
 import time
@@ -13,7 +10,6 @@ import cloudpickle
 import pytest
 
 zmq = pytest.importorskip("zmq")
-psutil = pytest.importorskip("psutil")
 
 from idlemesh import Mesh  # noqa: E402
 from idlemesh.protocol import Codec, MsgType, RemoteError  # noqa: E402
@@ -41,57 +37,6 @@ def fail_on_agent(x):
     return x
 
 
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _kill_tree(proc):
-    try:
-        parent = psutil.Process(proc.pid)
-        procs = [*parent.children(recursive=True), parent]
-    except psutil.NoSuchProcess:
-        return
-    for p in procs:
-        try:
-            p.kill()
-        except psutil.NoSuchProcess:
-            pass
-    psutil.wait_procs(procs, timeout=10)
-
-
-@pytest.fixture
-def agent(tmp_path):
-    started = []
-
-    def start(secret=SECRET, workers=2):
-        port = _free_port()
-        cmd = [sys.executable, "-m", "idlemesh.cli", "serve", "--host", "127.0.0.1"]
-        cmd += ["--port", str(port), "--secret", secret, "--workers", str(workers), "--force"]
-        cmd += ["--no-advertise", "--name", f"test-agent-{port}"]
-        env = {**os.environ, "IDLEMESH_TEST_AGENT": "1", "IDLEMESH_HOME": str(tmp_path / "agent")}
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
-        )
-        started.append(proc)
-        lines = queue.Queue()
-        threading.Thread(target=lambda: [lines.put(ln) for ln in proc.stdout], daemon=True).start()
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            try:
-                if "listening" in lines.get(timeout=1):
-                    return f"127.0.0.1:{port}", proc
-            except queue.Empty:
-                if proc.poll() is not None:
-                    break
-        raise RuntimeError("agent did not start")
-
-    yield start
-    for proc in started:
-        _kill_tree(proc)
-
-
 def test_remote_map_returns_correct_results(agent):
     addr, _ = agent()
     mesh = Mesh(workers=1, nodes=[addr], secret=SECRET)
@@ -108,10 +53,10 @@ def test_wrong_secret_is_rejected_and_job_finishes_locally(agent):
     assert mesh.last_stats == {"local": 10}
 
 
-def test_killing_agent_mid_job_still_completes(agent):
+def test_killing_agent_mid_job_still_completes(agent, kill):
     addr, proc = agent()
     mesh = Mesh(workers=1, nodes=[addr], secret=SECRET, node_timeout=1.0, ping_interval=0.2)
-    killer = threading.Timer(1.5, _kill_tree, args=(proc,))
+    killer = threading.Timer(1.5, kill, args=(proc,))
     killer.start()
     try:
         out = mesh.map(slower_square, range(40), chunk_size=1)
