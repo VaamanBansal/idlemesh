@@ -62,19 +62,17 @@ def _kill_tree(proc):
 
 
 @pytest.fixture
-def agent():
+def agent(tmp_path):
     started = []
 
     def start(secret=SECRET, workers=2):
         port = _free_port()
         cmd = [sys.executable, "-m", "idlemesh.cli", "serve", "--host", "127.0.0.1"]
         cmd += ["--port", str(port), "--secret", secret, "--workers", str(workers), "--force"]
+        cmd += ["--no-advertise", "--name", f"test-agent-{port}"]
+        env = {**os.environ, "IDLEMESH_TEST_AGENT": "1", "IDLEMESH_HOME": str(tmp_path / "agent")}
         proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env={**os.environ, "IDLEMESH_TEST_AGENT": "1"},
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
         )
         started.append(proc)
         lines = queue.Queue()

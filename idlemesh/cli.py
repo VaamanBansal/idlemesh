@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
 
 
@@ -35,8 +36,23 @@ def cmd_serve(args: argparse.Namespace) -> None:
     if not secret:
         raise SystemExit("a shared secret is required: --secret or the IDLEMESH_SECRET env var")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    mesh = args.mesh or os.environ.get("IDLEMESH_MESH") or "default"
+
+    def _stop(*_):
+        raise KeyboardInterrupt  # unwind serve_forever so it unregisters from mDNS
+
+    signal.signal(signal.SIGTERM, _stop)
+    agent = Agent(
+        args.port,
+        secret,
+        workers=args.workers,
+        force=args.force,
+        host=args.host,
+        name=args.name,
+        mesh=mesh,
+        advertise=not args.no_advertise,
+    )
     try:
-        agent = Agent(args.port, secret, workers=args.workers, force=args.force, host=args.host)
         agent.serve_forever()
     except KeyboardInterrupt:
         pass
@@ -63,6 +79,13 @@ def main() -> None:
     sv.add_argument("--secret", help="shared mesh secret (default: $IDLEMESH_SECRET)")
     sv.add_argument("--workers", type=int, help="worker processes (default: CPU count)")
     sv.add_argument("--force", action="store_true", help="accept work even when not lendable")
+    sv.add_argument(
+        "--name", help="name shown to mesh members (default: hostname); never broadcast"
+    )
+    sv.add_argument("--mesh", help="mesh to join (default: $IDLEMESH_MESH or 'default')")
+    sv.add_argument(
+        "--no-advertise", action="store_true", help="don't announce this agent via mDNS"
+    )
     sv.set_defaults(f=cmd_serve)
     s = sub.add_parser("simulate", help="compare naive vs prediction-aware scheduling")
     s.add_argument("--seed", type=int, default=0)

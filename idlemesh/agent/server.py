@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import time
 import traceback
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -19,8 +20,9 @@ from typing import Any
 
 import zmq
 
+from idlemesh.agent.discovery import Advertiser, make_advert, node_id
 from idlemesh.agent.idle import IdleMonitor
-from idlemesh.protocol import Codec, MsgType, dumps, loads
+from idlemesh.protocol import PROTOCOL_VERSION, Codec, MsgType, dumps, loads, python_version
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +62,17 @@ class Agent:
         force: bool = False,
         host: str = "*",
         monitor: IdleMonitor | None = None,
+        name: str | None = None,
+        mesh: str = "default",
+        advertise: bool = True,
     ) -> None:
         self.port = port
         self.host = host
+        self.name = name or socket.gethostname()  # only ever sent in the signed PONG
+        self.mesh = mesh
+        self.advertise = advertise
+        self.node_id = node_id(create=True)
+        self._warned_python: set[str] = set()
         self.codec = Codec(secret)
         self.workers = workers or os.cpu_count() or 2
         self.force = force
@@ -111,9 +121,14 @@ class Agent:
         sock.bind(f"tcp://{self.host}:{self.port}")
         self._new_pool()
         self.lendable()
+        advertiser = None
+        if self.advertise:
+            advertiser = Advertiser(make_advert(self.port, self.mesh, self.workers))
+            advertiser.start()
         print(
-            f"idlemesh agent listening on tcp://{self.host}:{self.port} "
-            f"(workers={self.workers}, force={self.force})",
+            f"idlemesh agent '{self.name}' (id {self.node_id}) listening on "
+            f"tcp://{self.host}:{self.port} (workers={self.workers}, force={self.force}, "
+            f"mesh={self.mesh!r}, advertised={'yes' if advertiser else 'no'})",
             flush=True,
         )
         try:
@@ -127,6 +142,8 @@ class Agent:
                         self._handle(sock, frames)
                 self._reap(sock)
         finally:
+            if advertiser is not None:
+                advertiser.stop()  # goodbye packets, so peers drop us right away
             sock.close()
             if self._pool is not None:
                 self._pool.shutdown(wait=False, cancel_futures=True)
@@ -142,7 +159,15 @@ class Agent:
         if msg is None:
             return
         if msg.type is MsgType.PING:
-            info = {"workers": self.workers, "lendable": self.lendable()}
+            self._check_peer_python(msg.payload)
+            info = {
+                "workers": self.workers,
+                "lendable": self.lendable(),
+                "python": python_version(),
+                "protocol": PROTOCOL_VERSION,
+                "name": self.name,
+                "node_id": self.node_id,
+            }
             self._send(sock, ident, MsgType.PONG, msg.chunk_id, info)
         elif msg.type is MsgType.RUN:
             if not self.lendable():
@@ -152,6 +177,24 @@ class Agent:
                 return
             self._running[self._submit(msg.payload)] = (ident, msg.chunk_id, self._pool_gen)
         # RESULT / ERROR / PONG are client-bound; ignore them here.
+
+    def _check_peer_python(self, payload: bytes) -> None:
+        """Warn (once per version) when a client on another Python pings us.
+        Phase 1 clients send an empty PING payload, which is fine."""
+        if not payload:
+            return
+        try:
+            theirs = str(loads(payload).get("python", ""))
+        except Exception:
+            return
+        if theirs and theirs != python_version() and theirs not in self._warned_python:
+            self._warned_python.add(theirs)
+            log.warning(
+                "a client on Python %s contacted this agent, which runs Python %s; it will "
+                "not send work here. Use the same Python version on both laptops.",
+                theirs,
+                python_version(),
+            )
 
     def _reap(self, sock: zmq.Socket) -> None:
         for fut in [f for f in self._running if f.done()]:

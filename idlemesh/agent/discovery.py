@@ -166,6 +166,8 @@ def build_service_info(advert: AgentAdvert):
         port=advert.port,
         properties=advert.txt(),
         server=f"idlemesh-{advert.node_id}.local.",  # never the machine's hostname
+        host_ttl=120,
+        other_ttl=120,  # zeroconf's default (75 min) keeps crashed agents visible far too long
     )
 
 
