@@ -4,7 +4,7 @@ IdleMesh has three roles. Any laptop can play any of them.
 
 ## Node agent (every laptop)
 
-- **Discovery** (`agent/discovery.py`): advertises `_idlemesh._tcp.local.` over mDNS, so peers find each other with no configuration.
+- **Discovery** (`agent/discovery.py`): `idlemesh serve` advertises `_idlemesh._tcp.local.` over mDNS, so peers find each other with no configuration. The TXT record holds only an opaque per-machine ID (`~/.idlemesh/node_id`), the mesh name, Python and protocol versions and worker count; the node's name and lendability are only in the signed PONG. `--no-advertise` turns it off.
 - **Idle monitor** (`agent/idle.py`): decides whether the machine is *lendable*: low CPU load, not on battery, and (Phase 4) no recent keyboard or mouse input.
 - **Activity log + predictor** (`predictor/`): one idle/busy sample per minute, kept locally. The predictor answers `predict_idle(node, duration)`, and only that probability is sent to the coordinator.
 - **Runner** (`agent/server.py`, `idlemesh serve`): a ZeroMQ ROUTER socket that accepts signed chunks and runs them in a subprocess pool, so a crashing job never takes the agent down. It refuses work when the idle monitor says the machine isn't lendable (unless `--force`). Docker with resource limits comes in Phase 5.
@@ -24,7 +24,9 @@ IdleMesh has three roles. Any laptop can play any of them.
 
 ## SDK
 
-`Mesh.map(fn, inputs, chunk_size)` and the `@task` decorator. Code written against the SDK today (local process pool) keeps working unchanged when remote execution lands.
+`Mesh.map(fn, inputs, chunk_size)` and the `@task` decorator. `Mesh()` uses the local process pool; `Mesh(nodes=[...])` adds agents at known addresses; `Mesh(discover=True)` adds agents found over mDNS.
+
+With discovery on, a `Browser` (zeroconf, or a fake in tests) feeds advertisements to `sdk/discover.py`, which drops other meshes, this laptop's own agent, and agents on a different Python `major.minor` or protocol version (one warning each). The coordinator's event loop picks up new candidates every iteration, so agents that appear mid-job start receiving chunks; agents that vanish are handled by the heartbeat timeout and `release_node()`. The PING/PONG handshake repeats the version check, so explicitly listed nodes get the same message.
 
 ## The availability predictor
 

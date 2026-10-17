@@ -20,11 +20,11 @@ def simulate(seed):
     return sum(rng.random() for _ in range(1_000_000))
 
 
-results = Mesh().map(simulate, range(1_000), chunk_size=10)                # this laptop only
-results = Mesh(nodes=["192.168.1.20:7450"]).map(simulate, range(1_000), chunk_size=10)  # + a friend's
+results = Mesh().map(simulate, range(1_000), chunk_size=10)               # this laptop only
+results = Mesh(discover=True).map(simulate, range(1_000), chunk_size=10)  # + friends' laptops on the Wi-Fi
 ```
 
-> **Status:** pre-alpha. The core pieces (job chunking, fault-tolerant queue, cost-model scheduler, availability predictor, credit ledger, simulator) work and are tested. **Remote execution works** between laptops on the same LAN; for now you type the other laptop's address (automatic discovery is Phase 2 of the [roadmap](#roadmap)).
+> **Status:** pre-alpha. The core pieces (job chunking, fault-tolerant queue, cost-model scheduler, availability predictor, credit ledger, simulator) work and are tested. **Remote execution works** between laptops on the same LAN, and laptops **find each other automatically** over mDNS (or you can give addresses explicitly).
 
 ## Why
 
@@ -50,7 +50,7 @@ IdleMesh is built around those constraints.
 | Idle detection | CPU load and battery state today; keyboard/mouse idle time next | 🟡 |
 | Memory-aware scheduling | Tasks declare how much RAM they need (`@task(memory="12GB")`); jobs only go to laptops with enough free memory | ⏳ Phase 3 |
 | Memory protection | Caps each job's RAM and pauses or stops it when the owner's own apps need memory back | ⏳ Phase 4 |
-| Zero-config discovery | Laptops find each other over mDNS; nobody types an IP address | 🟡 |
+| Zero-config discovery | Laptops find each other over mDNS; nobody types an IP address. Only an opaque ID is broadcast, never your name | ✅ |
 | Remote execution | Ship chunks to peer laptops over a signed ZeroMQ channel; a lost laptop's chunks are rerun elsewhere | ✅ |
 | Sandboxing | Docker with CPU, memory and filesystem limits | ⏳ Phase 5 |
 | GPU chunks | CuPy/PyTorch on Linux or WSL2 with NVIDIA | ⏳ Phase 5 |
@@ -72,7 +72,7 @@ pytest
 
 ## Try it on two laptops
 
-Both laptops need to be on the same Wi-Fi and have the same shared secret. Anyone with the secret can run code on the agent laptop, so pick a long random one and only share it with people you trust.
+Both laptops need to be on the same Wi-Fi, run the same Python `major.minor` (for example both 3.12; `python --version` shows it), and share the same secret. Anyone with the secret can run code on the agent laptop, so pick a long random one and only share it with people you trust.
 
 **On both laptops:**
 
@@ -92,15 +92,26 @@ $env:IDLEMESH_SECRET = "correct-horse-battery-staple-42"      # Windows PowerShe
 **On the friend's laptop (the one lending compute):**
 
 ```bash
-idlemesh serve --port 7450
+idlemesh serve
 ```
 
-Find its LAN address with `ipconfig` (Windows), `ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux), e.g. `192.168.1.20`. Allow incoming connections on port 7450 if the firewall asks. The agent refuses work while the laptop is busy or on battery; add `--force` to skip that check while testing.
+It listens on port 7450 and announces itself on the LAN. Allow incoming connections if the firewall asks (on Windows, allow Python on **private** networks). The agent refuses work while the laptop is busy or on battery; add `--force` to skip that check while testing. Use `--name` to choose the name your mesh sees (default: the hostname) and `--mesh NAME` if your group uses its own mesh name.
 
-**On your laptop:**
+**On your laptop**, check that you can see it:
+
+```bash
+idlemesh nodes
+```
+
+```
+ID            NAME          ADDRESS             WORKERS  PYTHON  LENDABLE  COMPATIBLE
+3f9a0c1b2d4e  aahav-laptop  192.168.1.20:7450   8        3.12    yes       yes
+```
+
+Then run work on it:
 
 ```python
-# remote_demo.py
+# mesh_demo.py
 import random
 
 from idlemesh import Mesh
@@ -112,31 +123,37 @@ def simulate(seed):
 
 
 if __name__ == "__main__":
-    mesh = Mesh(nodes=["192.168.1.20:7450"])  # reads IDLEMESH_SECRET
-    results = mesh.map(simulate, range(400), chunk_size=10)
-    print(len(results), "results;", "chunks per node:", mesh.last_stats)
+    with Mesh(discover=True) as mesh:  # finds agents on the LAN; reads IDLEMESH_SECRET
+        results = mesh.map(simulate, range(400), chunk_size=10)
+        print(len(results), "results;", "chunks per node:", mesh.last_stats)
 ```
 
 ```bash
-python remote_demo.py
+python mesh_demo.py
 ```
 
-Chunks run on the friend's laptop and on your own worker processes at the same time, and results come back in input order. If the friend closes the lid, their chunks are rerun on your laptop. If the function raises an exception on the friend's laptop, `map()` raises `idlemesh.protocol.RemoteError` with the remote traceback.
+Chunks run on the friend's laptop and on your own worker processes at the same time, and results come back in input order. Discovery keeps running during `map()`: a laptop that starts `idlemesh serve` mid-job joins in, and one that closes its lid has its chunks rerun elsewhere. If the function raises an exception on the friend's laptop, `map()` raises `idlemesh.protocol.RemoteError` with the remote traceback.
+
+**If discovery doesn't find anything**, give the address explicitly instead. Find it with `ipconfig` (Windows), `ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux):
+
+```python
+mesh = Mesh(nodes=["192.168.1.20"])                  # port defaults to 7450; "192.168.1.20:7451" also works
+mesh = Mesh(nodes=["192.168.1.20"], discover=True)   # or both: explicit nodes plus whatever is found
+```
 
 Notes:
 
 - Define your function in the script you run (or in a package installed on both laptops). Functions from other local modules are sent by reference, so the agent must be able to import them; `cloudpickle.register_pickle_by_value(module)` ships a module by value instead.
+- Both laptops must run the same Python `major.minor`, because cloudpickle's format differs between versions. A mismatched laptop is skipped with a message like `Skipping aahav-laptop (192.168.1.20:7450): it runs Python 3.13, you run 3.10. Use the same Python version on both laptops.`
 - Every message is signed (HMAC-SHA256) and timestamped. If the two laptops' clocks differ by more than 5 minutes, messages are rejected and the agent logs a warning saying so: turn on automatic time sync.
 - Traffic is signed, not encrypted: someone else on the Wi-Fi can read inputs and results, but can't forge or replay jobs.
 
-## LAN discovery (preview)
+### Troubleshooting discovery
 
-To try LAN discovery, install the networking extras on two machines on the same Wi-Fi:
-
-```bash
-pip install -e ".[net]"
-idlemesh join --name my-laptop
-```
+- Discovery uses mDNS: multicast UDP on port **5353**. **Campus and office Wi-Fi often block it** (and often block laptops from reaching each other at all). A **phone hotspot** works around both; explicit `nodes=["IP"]` work whenever the laptops can reach each other.
+- **Windows:** the first time `idlemesh serve` (or `idlemesh nodes`) runs, allow Python through the firewall on **private** networks, and make sure the Wi-Fi network is set to *Private*, not *Public*.
+- `idlemesh nodes` lists agents but `NAME` and `LENDABLE` show `?`: set `IDLEMESH_SECRET`, because those are only shared with mesh members. `? (no reply)` with the secret set means a different secret, or a firewall blocking port 7450.
+- Two friend groups on one Wi-Fi: give each its own `--mesh NAME` (or `IDLEMESH_MESH`) so they don't use each other's laptops.
 
 ## Smart about when friends need their laptops back
 
@@ -148,7 +165,7 @@ expected_cost = estimated_time / P(stays idle for that long)
 
 So long chunks drift toward reliable machines, and short chunks can go anywhere.
 
-**Privacy:** the activity log never leaves the owner's laptop. Only the probability is shared.
+**Privacy:** the activity log never leaves the owner's laptop. Only the probability is shared (see [Privacy](#privacy)).
 
 Results from `idlemesh simulate` (three synthetic laptop routines; two weeks of training, one week replayed; 45-minute chunks):
 
@@ -198,10 +215,11 @@ idlemesh/
   agent/        discovery, idle monitor, `serve` agent (sandbox runner coming)
   coordinator/  chunk queue, cost-model scheduler, credit ledger
   predictor/    predict_idle() interface + hour-of-week model
-  sdk/          Mesh.map() and @task; remote.py drives agents + the local pool
+  sdk/          Mesh.map() and @task; remote.py drives agents + the local pool;
+                discover.py decides which discovered agents to use
   simulator/    trace replay for comparing scheduling policies
   protocol.py   chunk format, serialization, signed message codec
-  cli.py        idlemesh status | join | serve | simulate
+  cli.py        idlemesh status | serve | nodes | simulate
 examples/       Monte Carlo option pricing
 docs/           architecture and security notes
 tests/
@@ -211,13 +229,14 @@ tests/
 
 - [x] **Phase 0:** repo, CI, core data structures
 - [x] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
-- [ ] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, SQLite-backed queue
+- [x] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, Python/protocol version checks
 - [ ] **Phase 3:** on-join benchmarking of CPU speed and link bandwidth; nodes report free RAM and the scheduler respects each task's memory requirement
 - [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM
 - [ ] **Phase 4.5:** live activity logging feeding the predictor
 - [ ] **Phase 5:** Docker sandboxing and GPU chunks
 - [ ] **Phase 6:** web dashboard, more examples, PyPI release
 - [ ] **Later:** shared in-memory data cache so chunks reuse datasets instead of re-transferring them
+- [ ] **Later:** SQLite-backed queue (deferred: `map()` runs in-process, so there's nothing to persist yet)
 
 ## How it compares
 
@@ -230,6 +249,24 @@ tests/
 | Memory-aware placement | ✅ (planned) | ✅ | ✅ | ✅ | ✅ |
 
 IdleMesh doesn't try to replace any of these. If you have a real cluster, use Ray. IdleMesh is for the case where "the cluster" is three laptops in a hostel room.
+
+## Privacy
+
+**Broadcast to everyone on the network** while `idlemesh serve` runs. This goes out over mDNS, so any device on the same Wi-Fi can read it, including people outside your mesh:
+
+| Field | Example | Why |
+|---|---|---|
+| Node ID | `3f9a0c1b2d4e` | A random ID generated once per machine and stored in `~/.idlemesh/node_id`. It says nothing about the machine or its owner; delete the file to get a new one |
+| IP address and port | `192.168.1.20:7450` | So peers can connect |
+| Mesh name | `default` | So friend groups sharing a Wi-Fi don't collide. Don't put anything personal in it |
+| Python and IdleMesh versions | `3.12`, `0.1.0`, protocol `2` | So incompatible laptops are skipped with a clear message |
+| Worker count | `8` | So peers know how much work to send |
+
+**Never broadcast:** your hostname, the `--name` you chose, whether the laptop is idle or busy right now, the secret or anything derived from it, and your activity log. IdleMesh doesn't announce your hostname, but your operating system may do so on its own; that's outside IdleMesh's control.
+
+**Shared only with people who have the secret**, in the signed handshake reply when they ping your agent: the node name (`--name`, default the hostname), whether the laptop is lendable right now, and its worker count and versions. `idlemesh nodes` fills in those columns only when you have the secret. Messages are signed, not encrypted, so someone capturing Wi-Fi traffic while a mesh member pings you could read that reply.
+
+**Never leaves your laptop:** the minute-by-minute activity log. Only availability probabilities computed from it are used for scheduling.
 
 ## Security
 
