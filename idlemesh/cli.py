@@ -44,7 +44,8 @@ def cmd_serve(args: argparse.Namespace) -> None:
         raise SystemExit("a shared secret is required: --secret or the IDLEMESH_SECRET env var")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        Agent(args.port, secret, workers=args.workers, force=args.force).serve_forever()
+        agent = Agent(args.port, secret, workers=args.workers, force=args.force, host=args.host)
+        agent.serve_forever()
     except KeyboardInterrupt:
         pass
 
@@ -66,6 +67,7 @@ def main() -> None:
     j.set_defaults(f=cmd_join)
     sv = sub.add_parser("serve", help="run chunks sent by other laptops")
     sv.add_argument("--port", type=int, default=7450)
+    sv.add_argument("--host", default="*", help="interface to listen on (default: all)")
     sv.add_argument("--secret", help="shared mesh secret (default: $IDLEMESH_SECRET)")
     sv.add_argument("--workers", type=int, help="worker processes (default: CPU count)")
     sv.add_argument("--force", action="store_true", help="accept work even when not lendable")
