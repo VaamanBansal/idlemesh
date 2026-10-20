@@ -43,12 +43,13 @@ IdleMesh is built around those constraints.
 |---|---|---|
 | Chunked jobs | Large jobs are split into small chunks, so a lost laptop loses only a little work | ✅ |
 | Fault-tolerant queue | Chunks are *leased*; if a node disappears, its chunks are requeued | ✅ |
-| Cost-model scheduler | Runs each chunk wherever it will finish first: `latency + transfer + compute + queue wait` | ✅ |
+| Cost-model scheduler | Runs each chunk wherever it will finish first: `latency + transfer + compute + queue wait`, with measured speed, round trips and bandwidth | ✅ |
+| Backup tasks | Near the end of a job, idle workers run copies of slow chunks; the first result wins, so a slow laptop can't hold the job up | ✅ |
 | Availability predictor | Learns each laptop's weekly routine and avoids putting long chunks on machines about to get busy | ✅ |
 | Simulator | Replays usage traces to measure how much work the predictor saves | ✅ |
 | Credit ledger | Lend compute to earn credits, borrow to spend them; credits set priority | ✅ |
 | Idle detection | CPU load and battery state today; keyboard/mouse idle time next | 🟡 |
-| Memory-aware scheduling | Tasks declare how much RAM they need (`@task(memory="12GB")`); jobs only go to laptops with enough free memory | ⏳ Phase 3 |
+| Memory-aware scheduling | Tasks declare how much RAM they need (`map(..., memory="12GB")`); each laptop only runs as many as fit in its free RAM | ✅ |
 | Memory protection | Caps each job's RAM and pauses or stops it when the owner's own apps need memory back | ⏳ Phase 4 |
 | Zero-config discovery | Laptops find each other over mDNS; nobody types an IP address. Only an opaque ID is broadcast, never your name | ✅ |
 | Remote execution | Ship chunks to peer laptops over a signed ZeroMQ channel; a lost laptop's chunks are rerun elsewhere | ✅ |
@@ -203,22 +204,55 @@ Results from `idlemesh simulate` (three synthetic laptop routines; two weeks of 
 
 Prediction roughly **halves the work lost to owners reclaiming their laptops**, at the cost of placing somewhat fewer long chunks. The simulator is the place to explore that trade-off.
 
+## A scheduler that keeps up with slow laptops
+
+A job finishes when its slowest chunk does. Early two-laptop tests showed the problem: with few, long tasks, one laptop finished its share and sat idle while the friend's slower laptop worked through the last chunks.
+
+| Run (ML hyperparameter search, compare both) | Alone | With friend | Speedup |
+|---|---|---|---|
+| medium (friend: 16 workers, sent 17 chunks) | 20.2 s | 23.9 s | 0.85× |
+| large | 42.9 s | 41.3 s | 1.04× |
+
+The scheduler now does five things about it:
+
+- **Backup tasks.** When nothing is left to hand out and this laptop has idle workers while chunks are still running elsewhere, it starts copies of the most overdue ones (judged by each laptop's measured speed) and keeps whichever result arrives first. An idle, faster friend can take a backup too. `mesh.last_stats.backups_launched` and `.backups_won` say how often this happened.
+- **Measured speed.** Each laptop's compute time per chunk is measured from the agent's own timings and kept as a running average (`mesh.last_stats.seconds_per_chunk`). Slow laptops get fewer chunks near the end, and none that this laptop would finish sooner.
+- **No queueing near the end.** A laptop only gets more chunks than it has workers while there's plenty of work left; near the end, no chunk ever waits behind a busy worker on another laptop.
+- **Longest tasks first.** `map(..., cost=fn)` takes your estimate of how expensive each input is and starts the expensive ones first, so the long tasks aren't the ones still running at the end. Results still come back in input order. The built-in ML demo uses it; its cost function was fitted to measured training times (bigger networks and smaller learning rates take longer). `cost=` only helps when task times vary: in the backtest demo every strategy takes the same time, so it has none.
+- **Network awareness.** Round trips are measured continuously and the 90th percentile, not the average, decides end-of-job placement, so a laptop that's usually quick but sometimes stalls isn't trusted with the last chunks. Short tasks over a slow link are sent several per message (aiming for network time ≤ 10% of compute); long tasks always go one at a time. Bandwidth is measured too, so jobs with large inputs prefer nearby laptops or stay local. A laptop whose network costs more than it helps is skipped for that job, with the reason in the log and the UI (e.g. `skipped aahav-laptop: network delay too high for these short tasks`).
+
+```python
+mesh = Mesh(discover=True)
+results = mesh.map(train, configs, chunk_size=1, cost=lambda cfg: cfg.epochs * cfg.width)
+print(mesh.last_stats)                    # chunks per laptop
+print(mesh.last_stats.backups_won)        # backup copies that finished first
+print(mesh.last_stats.seconds_per_chunk)  # measured speed per laptop
+```
+
+> **Functions with side effects:** with backups, a chunk can run twice (the slower copy's result is thrown away). If your function writes files, sends messages or charges money, use `Mesh(speculative=False)`.
+
+### Before / after Phase 3
+
+Same two laptops, same Wi-Fi, ML hyperparameter search in "compare both" mode:
+
+| Run | Before: alone | Before: with friend | Before: speedup | After: alone | After: with friend | After: speedup |
+|---|---|---|---|---|---|---|
+| medium | 20.2 s | 23.9 s | 0.85× | | | |
+| large | 42.9 s | 41.3 s | 1.04× | | | |
+
+<!-- TODO: fill in the "After" cells from a real rerun with the same two laptops. -->
+
 ## Memory-aware scheduling (not RAM sharing)
 
 IdleMesh does **not** let your laptop use a friend's RAM as its own. Over Wi-Fi, a round trip takes milliseconds while local RAM answers in about 100 nanoseconds, so remote memory would be slower than your own SSD.
 
-Instead, IdleMesh **runs the job where the RAM is**. A task declares how much memory it needs, each laptop reports its free RAM, and the scheduler only places the task on machines that can fit it:
+Instead, IdleMesh **runs the job where the RAM is**. You say how much memory one task needs, each laptop reports its free RAM, and the scheduler only runs as many tasks on a laptop at once as fit:
 
 ```python
-from idlemesh import task
-
-
-@task(memory="12GB")  # planned API: won't be sent to a laptop with less free RAM
-def backtest(params):
-    ...
+results = Mesh(discover=True).map(backtest, params, chunk_size=1, memory="12GB")
 ```
 
-If your laptop has 8 GB and the job needs 12, it runs on the friend with 16. The agent also caps each job's memory, so a big job can never freeze the owner's laptop.
+If your laptop has 8 GB free and a task needs 12, the tasks run on the friend with 16. If no laptop can fit even one task, `map()` raises `MemoryError` before running anything, listing each laptop's free RAM. If a laptop's free RAM drops after a task was sent, its agent replies BUSY and the task goes elsewhere. `memory=` accepts bytes or strings like `"512MB"` and `"4GB"`. Capping a running task's memory so it backs off when the owner needs RAM comes in Phase 4.
 
 ## How it works
 
@@ -260,7 +294,7 @@ tests/
 - [x] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
 - [x] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, Python/protocol version checks
 - [x] Basic testing UI (`idlemesh ui`)
-- [ ] **Phase 3: smarter scheduler.** Backup tasks at the end of a job, measured per-laptop speed, no queued chunks near the end, longest tasks first (`cost=`), memory-aware placement (`memory=`). See [docs/phase3.md](docs/phase3.md).
+- [x] **Phase 3: smarter scheduler.** Backup tasks at the end of a job, measured per-laptop speed, no queued chunks near the end, longest tasks first (`cost=`), memory-aware placement (`memory=`), network-aware batching and placement (RTT p90, bandwidth). See [docs/phase3.md](docs/phase3.md).
 - [ ] **Phase 3.5: model workers.** `setup=` loads a model once per worker and keeps it in memory across tasks; `per_node=` limits concurrent tasks per laptop; the scheduler counts load time; memory is released when idle or when lending stops; a failed `setup` marks that laptop as unable to run the job instead of failing it.
 - [ ] **Phase 4: respecting owners and sharing fairly.** Keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM; credits, and fair turns between several people using the mesh at once.
 - [ ] **Phase 4.5:** live activity logging feeding the availability predictor
@@ -281,7 +315,7 @@ tests/
 | Setup | Zero config (mDNS) | Head node + config | Admin setup | Project server | Zero config |
 | Owner returns to machine | Pause + predict | Not a concern | Evicts jobs | Pauses | Not a concern |
 | Predicts availability | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Memory-aware placement | ✅ (planned) | ✅ | ✅ | ✅ | ✅ |
+| Memory-aware placement | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 IdleMesh doesn't try to replace any of these. If you have a real cluster, use Ray. IdleMesh is for the case where "the cluster" is three laptops in a hostel room.
 
