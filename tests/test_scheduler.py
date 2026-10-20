@@ -98,9 +98,11 @@ def test_speed_tracking_converges_for_fast_and_slow_laptops(fake_agent):
     fast = fake_agent(SECRET, workers=2, name="fast")
     slow = fake_agent(SECRET, workers=2, slow=4.0, name="slow")
     mesh = Mesh(workers=1, nodes=[fast.addr, slow.addr], secret=SECRET, speculative=False)
-    mesh.map(functools.partial(nap, 0.05), range(60), chunk_size=1)
+    # 0.2 s tasks: CI runners (macOS especially) overshoot short sleeps by up to ~50 ms,
+    # and the fake slow laptop multiplies whatever its task really took.
+    mesh.map(functools.partial(nap, 0.2), range(40), chunk_size=1)
     spc = mesh.last_stats.seconds_per_chunk
-    # Ratios, not absolute times: CI runners (macOS especially) overshoot short sleeps.
+    # Ratios, not absolute times, for the same reason.
     assert 0.6 < spc[fast.addr] / spc["local"] < 1.6, spc  # same 1x work as this laptop
     assert 2.5 < spc[slow.addr] / spc[fast.addr] < 6, spc  # 4x slower laptop
 
