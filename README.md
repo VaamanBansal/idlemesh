@@ -231,16 +231,39 @@ print(mesh.last_stats.seconds_per_chunk)  # measured speed per laptop
 
 > **Functions with side effects:** with backups, a chunk can run twice (the slower copy's result is thrown away). If your function writes files, sends messages or charges money, use `Mesh(speculative=False)`.
 
+Measured speedups, before and after, are in [Measured results](#measured-results).
+
+## Measured results
+
+Real runs on campus Wi-Fi with three laptops (this laptop, `LAPTOP-427SH62D` and Aahav's), Phase 3 merged, every demo at **Large · Compare both**. Results matched the local run every time.
+
+> These numbers were measured **before** the ML demo was split into one task per (configuration, fold) pair, so ML Large was 54 tasks of 15–28 s each instead of today's 540 tasks of about 1.5–3 s, and before longest tasks were steered to the fastest laptop. With 54 tasks and about 56 workers across the three laptops, the ML job was bounded by its longest tasks landing on the slower laptops (the lower bound on these laptops was about 23–24 s, against the 29.6 s measured). Both changes target exactly that; new numbers will replace these after a rerun.
+
+| Demo | Tasks | Alone | Mesh | Speedup | Per-laptop chunks (s/chunk) |
+|---|---|---|---|---|---|
+| ML hyperparameter search | 54 (15–28 s each) | 42.3 s | 29.6 s | 1.43× | this laptop 24 (14.39), LAPTOP-427SH62D 16 (22.19), Aahav 14 (23.27); backups 15 launched, 1 won |
+| Option pricing | 192 (~0.3 s) | 3.5 s | 2.6 s | 1.37× | this laptop 126 (0.30), LAPTOP-427SH62D 44 (0.38), Aahav 22 (0.63) |
+| Backtest sweep | 46 (~6 s) | 11.3 s | 8.3 s | 1.36× | this laptop 24 (6.08), LAPTOP-427SH62D 22 (6.43); Aahav ran nothing; backups 19 launched, 11 won |
+
+Aahav's laptop was compatible but ran nothing in the backtest run, and the page didn't say why. Every laptop that runs nothing now gets a reason in `mesh.last_stats.skipped` and on the page (for example "not lendable at start of run" or "skipped: network delay too high for these short tasks").
+
 ### Before / after Phase 3
 
-Same two laptops, same Wi-Fi, ML hyperparameter search in "compare both" mode:
+Two laptops (this laptop and Aahav's), same Wi-Fi, ML hyperparameter search at **Large · Compare both** (54 tasks, before the per-fold split):
 
-| Run | Before: alone | Before: with friend | Before: speedup | After: alone | After: with friend | After: speedup |
-|---|---|---|---|---|---|---|
-| medium | 20.2 s | 23.9 s | 0.85× | | | |
-| large | 42.9 s | 41.3 s | 1.04× | | | |
+| | Alone | With friend | Speedup |
+|---|---|---|---|
+| Before Phase 3 | 42.9 s | 41.3 s | 1.04× |
+| After Phase 3 | 44.0 s | 32.9 s | 1.34× |
 
-<!-- TODO: fill in the "After" cells from a real rerun with the same two laptops. -->
+Other two-laptop runs after Phase 3 reached 1.19× and 1.34×. Aahav's laptop went from 37.5 to 28.2 s per task, and to 23.3 s once plugged in. A three-laptop run with Aahav on battery got 1.24×.
+
+### Tips for good speedups
+
+- **Keep lending laptops plugged in, and on Windows set Power mode to *Best performance*** (Settings → System → Power & battery). One laptop went from 23 s to 28+ s per task on battery.
+- **Aim for at least ~5× more tasks than total workers across the mesh.** The scheduler can only balance work it hasn't handed out yet: with about as many tasks as workers, the job ends when the slowest laptop's last task does. Smaller tasks (a smaller `chunk_size`, or splitting work the way the ML demo now splits folds) give it room.
+- **Very short jobs (a few seconds) gain less.** Starting worker processes and the first round trips cost a fixed second or so, whatever the job size.
+- Give `cost=` when task times vary a lot, so the longest tasks start first and go to the fastest laptop.
 
 ## Memory-aware scheduling (not RAM sharing)
 
