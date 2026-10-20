@@ -259,14 +259,19 @@ tests/
 - [x] **Phase 0:** repo, CI, core data structures
 - [x] **Phase 1:** remote execution between two laptops (ZeroMQ job channel)
 - [x] **Phase 2:** mDNS discovery wired to the coordinator, heartbeats, Python/protocol version checks
-- [ ] **Phase 3:** on-join benchmarking of CPU speed and link bandwidth; nodes report free RAM and the scheduler respects each task's memory requirement
-- [ ] **Phase 4:** keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM
-- [ ] **Phase 4.5:** live activity logging feeding the predictor
-- [ ] **Phase 5:** Docker sandboxing and GPU chunks
 - [x] Basic testing UI (`idlemesh ui`)
-- [ ] **Phase 6:** fuller web dashboard (credits, history, charts), more examples, PyPI release
+- [ ] **Phase 3: smarter scheduler.** Backup tasks at the end of a job, measured per-laptop speed, no queued chunks near the end, longest tasks first (`cost=`), memory-aware placement (`memory=`). See [docs/phase3.md](docs/phase3.md).
+- [ ] **Phase 3.5: model workers.** `setup=` loads a model once per worker and keeps it in memory across tasks; `per_node=` limits concurrent tasks per laptop; the scheduler counts load time; memory is released when idle or when lending stops; a failed `setup` marks that laptop as unable to run the job instead of failing it.
+- [ ] **Phase 4: respecting owners and sharing fairly.** Keyboard/mouse idle detection on Linux, macOS and Windows; pause on owner activity; per-job memory caps that back off when the owner needs RAM; credits, and fair turns between several people using the mesh at once.
+- [ ] **Phase 4.5:** live activity logging feeding the availability predictor
+- [ ] **Phase 5: shared group models and result cache.** A laptop can host a model for the whole group (`idlemesh host`); everyone's tasks that need it go there and take fair turns; results are cached under a fingerprint of function, input, model version and settings, so work one group member already did is never recomputed. Built for small teams running the same experiments, e.g. one laptop hosting a vision-language model and another hosting an LLM for a shared RAG project.
+- [ ] **Phase 6:** GPU awareness (NVIDIA and Apple Silicon) and `requires={"gpu": True}`; Docker sandboxing
+- [ ] **Phase 7:** fuller web dashboard (credits, history, charts), more examples, PyPI release
+- [ ] **Later:** distributed training of one small/medium model by syncing rarely (local SGD / DiLoCo-style weight averaging over Wi-Fi)
 - [ ] **Later:** shared in-memory data cache so chunks reuse datasets instead of re-transferring them
 - [ ] **Later:** SQLite-backed queue (deferred: `map()` runs in-process, so there's nothing to persist yet)
+
+**Scope:** IdleMesh speeds up batch work across a few trusted laptops: simulations, sweeps, and batch inference with models each laptop can hold. It doesn't split a single model across machines or serve live traffic.
 
 ## How it compares
 
