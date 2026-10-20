@@ -23,6 +23,8 @@ from idlemesh.coordinator.scheduler import Scheduler
 from idlemesh.protocol import Chunk, dumps, loads, parse_node, split
 
 if TYPE_CHECKING:
+    from multiprocessing.context import BaseContext
+
     from idlemesh.agent.discovery import Browser
     from idlemesh.sdk.discover import Discovery
 
@@ -52,8 +54,12 @@ class Mesh:
         mesh: str | None = None,
         discover_timeout: float = 2.0,
         browser: Browser | None = None,
+        mp_context: BaseContext | None = None,
     ) -> None:
         """
+        mp_context: multiprocessing context for the local worker pool. None keeps
+            Python's default for local-only runs (remote runs always use a fork-safe
+            one); pass idlemesh._mp.pool_context() when calling from a threaded process.
         nodes: "host[:port]" of agents started with `idlemesh serve` (port defaults to 7450).
         discover: also find agents on the LAN over mDNS, before and during each map().
         mesh: only use discovered agents in this mesh (default: $IDLEMESH_MESH or "default").
@@ -85,6 +91,7 @@ class Mesh:
         self.chunk_timeout = chunk_timeout
         self.scheduler = scheduler or Scheduler()
         self.remote_slowdown_limit = remote_slowdown_limit
+        self.mp_context = mp_context
         self.last_stats: dict[str, int] = {}  # node -> chunks it completed in the last map()
 
     def discovery(self) -> Discovery:
@@ -139,7 +146,7 @@ class Mesh:
         job_id = uuid.uuid4().hex[:8]
         chunks = split(job_id, fn, list(inputs), chunk_size)
         self.queue.submit(chunks)
-        with ProcessPoolExecutor(max_workers=self.workers) as pool:
+        with ProcessPoolExecutor(max_workers=self.workers, mp_context=self.mp_context) as pool:
             futures = {}
             while (c := self.queue.lease("local")) is not None:
                 futures[c.chunk_id] = pool.submit(_run_serialized, dumps(c))

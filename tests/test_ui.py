@@ -272,3 +272,22 @@ def test_token_survives_restart(isolated_home):
     first = load_token()
     assert len(first) >= 32 and load_token() == first
     assert (isolated_home / "ui_token").exists()
+
+
+def test_ui_runs_use_a_fork_safe_pool(ui, monkeypatch):
+    """The UI process runs threads, so its worker pools must never use fork()."""
+    import idlemesh.sdk
+
+    contexts = []
+    real_mesh = idlemesh.sdk.Mesh
+
+    def spy(*args, **kwargs):
+        contexts.append(kwargs.get("mp_context"))
+        return real_mesh(*args, **kwargs)
+
+    monkeypatch.setattr(idlemesh.sdk, "Mesh", spy)
+    _, client = ui
+    client.post("/api/run", json={"demo": "option", "size": "small", "mode": "local"})
+    wait_for(client, finished)
+    assert contexts and all(c is not None for c in contexts)
+    assert all(c.get_start_method() != "fork" for c in contexts)

@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from idlemesh._mp import pool_context
 from idlemesh.agent.discovery import (
     AgentAdvert,
     Browser,
@@ -425,7 +426,11 @@ class UIState:
                         run.update(done=done, total=total, per_node=rows)
 
                 w = self.local_workers
-                mesh = Mesh(w) if phase == "local" else Mesh(w, nodes=nodes, secret=secret)
+                ctx = pool_context()  # fork-safe: this process runs server/prober/agent threads
+                if phase == "local":
+                    mesh = Mesh(w, mp_context=ctx)
+                else:
+                    mesh = Mesh(w, nodes=nodes, secret=secret, mp_context=ctx)
                 t0 = time.perf_counter()
                 results = mesh.map(
                     demo.fn, inputs, chunk_size=demo.chunk_size, on_progress=progress

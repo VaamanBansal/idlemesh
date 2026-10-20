@@ -175,7 +175,8 @@ class RemoteRun:
         chunks = split(job_id, fn, list(inputs), chunk_size)
         self.total = len(chunks)
         self.queue.submit(chunks)
-        pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=pool_context())
+        ctx = self.mesh.mp_context or pool_context()
+        pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=ctx)
         try:
             self._connect()
             while not self.queue.is_done(job_id, len(chunks)):
