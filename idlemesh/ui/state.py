@@ -477,6 +477,7 @@ class UIState:
                     cost=demo.cost,
                 )
                 seconds = time.perf_counter() - t0
+                results = demo.finish(results)  # e.g. ML: fold scores -> one per model
                 outputs[phase] = results
                 summary = demo.summarize(results)
                 remote_chunks = sum(v for k, v in mesh.last_stats.items() if k != "local")
