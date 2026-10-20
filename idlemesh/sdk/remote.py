@@ -105,6 +105,10 @@ class _Node:
     inflight: dict[str, _Sent] = field(default_factory=dict)  # chunk_id -> where/when
     batches: dict[str, _Batch] = field(default_factory=dict)  # batch id -> its chunks
 
+    def rtt_p90(self) -> float:
+        now = time.perf_counter()
+        return self.rtt.p90(waiting=[now - sent for sent in self.pings.values()])
+
     @property
     def label(self) -> str:
         return f"{self.name} ({self.addr})" if self.name else self.addr
@@ -342,7 +346,7 @@ class RemoteRun:
             node.addr,
             speed=self._cpu("local") / self._cpu(node.addr),
             bandwidth_bps=node.bw.bps,
-            latency_s=node.rtt.p90() if p90 else node.rtt.mean(),
+            latency_s=node.rtt_p90() if p90 else node.rtt.mean(),
             queue_wait_s=busy / node.workers * units * self._cpu(node.addr),
         )
         return self.mesh.scheduler.expected_cost(probe, info)
@@ -401,7 +405,7 @@ class RemoteRun:
             if not (node.alive and node.ready) or len(node.rtt) == 0:
                 continue
             compute = mean_units * self._cpu(node.addr)
-            latency = node.rtt.p90() / MAX_BATCH  # even with the biggest batch
+            latency = node.rtt_p90() / MAX_BATCH  # even with the biggest batch
             transfer = nbytes / node.bw.bps
             reason = None
             if latency + transfer > compute:
@@ -512,7 +516,7 @@ class RemoteRun:
                 if sent.backup or cid in self.backups or self.queue.is_completed(cid):
                     continue
                 units = self.units.get(cid, 1.0)
-                expected = node.rtt.p90() + units * self._cpu(node.addr)
+                expected = node.rtt_p90() + units * self._cpu(node.addr)
                 candidates.append((now - sent.sent - expected, cid, node, units, expected))
         candidates.sort(key=lambda t: t[0], reverse=True)  # most overdue first
         for overdue, cid, holder, units, expected in candidates:
@@ -533,7 +537,7 @@ class RemoteRun:
                     continue
                 if len(other.inflight) >= min(other.workers, other.mem_slots):
                     continue  # only a free worker: a backup must never wait in a queue
-                theirs = other.rtt.p90() + units * self._cpu(other.addr)
+                theirs = other.rtt_p90() + units * self._cpu(other.addr)
                 if theirs < remaining:
                     chunk = self.queue.lease_backup(cid, other.addr)
                     if chunk is not None:

@@ -67,10 +67,19 @@ class RttTracker:
     def mean(self, default: float = 0.005) -> float:
         return sum(self._samples) / len(self._samples) if self._samples else default
 
-    def p90(self, default: float = 0.005) -> float:
+    def p90(self, default: float = 0.005, waiting: list[float] | None = None) -> float:
+        """90th percentile. `waiting` are the ages of pings still unanswered: a ping out
+        for a seconds proves a round trip of at least a, so the ones already older than
+        the answered p90 count at their age (otherwise a slow tail stays invisible until
+        it finally arrives)."""
         if not self._samples:
-            return default
+            return max([default, *(waiting or [])])
         ordered = sorted(self._samples)
+        p = ordered[min(len(ordered) - 1, math.ceil(0.9 * len(ordered)) - 1)]
+        slow = [a for a in (waiting or []) if a > p]
+        if not slow:
+            return p
+        ordered = sorted([*ordered, *slow])
         return ordered[min(len(ordered) - 1, math.ceil(0.9 * len(ordered)) - 1)]
 
 

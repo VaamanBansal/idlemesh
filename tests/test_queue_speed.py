@@ -71,3 +71,13 @@ def test_bandwidth_ignores_small_transfers():
     assert not b.measured and b.bps == 10e6
     b.add(2_000_000, 2.0)
     assert b.measured and abs(b.bps - 1e6) < 1
+
+
+def test_rtt_p90_counts_pings_still_waiting_for_an_answer():
+    r = RttTracker()
+    for _ in range(10):
+        r.add(0.01)
+    assert r.p90() == 0.01
+    assert r.p90(waiting=[0.005]) == 0.01  # a fresh ping says nothing new
+    assert r.p90(waiting=[0.8, 1.2]) == 0.8  # two slow pings still out: the tail is real
+    assert RttTracker().p90(default=0.005, waiting=[0.4]) == 0.4  # no answers yet at all
