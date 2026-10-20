@@ -38,10 +38,12 @@ class ChunkQueue:
             self._results.setdefault(c.job_id, {})
             self._pending.append(c)
 
-    def lease(self, node_id: str) -> Chunk | None:
+    def lease(self, node_id: str, end: str = "front") -> Chunk | None:
+        """Lease the next pending chunk. Pending chunks are in dispatch order (most
+        expensive first when the job gave costs); end="back" takes the cheapest instead."""
         if not self._pending:
             return None
-        chunk = self._pending.popleft()
+        chunk = self._pending.popleft() if end == "front" else self._pending.pop()
         chunk.attempts += 1
         self._leased[chunk.chunk_id] = Lease(chunk, {node_id: time.monotonic()})
         return chunk
@@ -54,9 +56,11 @@ class ChunkQueue:
         lease.holders[node_id] = time.monotonic()
         return lease.chunk
 
-    def peek(self) -> Chunk | None:
-        """The chunk `lease()` would hand out next, without leasing it."""
-        return self._pending[0] if self._pending else None
+    def peek(self, end: str = "front") -> Chunk | None:
+        """The chunk `lease(end=end)` would hand out next, without leasing it."""
+        if not self._pending:
+            return None
+        return self._pending[0] if end == "front" else self._pending[-1]
 
     def holders(self, chunk_id: str) -> dict[str, float]:
         lease = self._leased.get(chunk_id)

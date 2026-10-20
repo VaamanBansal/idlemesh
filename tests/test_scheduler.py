@@ -208,3 +208,34 @@ def test_large_inputs_stay_local_on_a_slow_link(fake_agent):
     small = list(range(20))  # control: the same link is fine for small inputs
     mesh.map(functools.partial(nap, 0.1), small, chunk_size=1)
     assert slow_link.name not in mesh.last_stats.skipped
+
+
+def sleep_for(seconds):
+    time.sleep(seconds)
+    return seconds
+
+
+def test_longest_tasks_go_to_the_fastest_laptop(fake_agent, monkeypatch):
+    durations = [0.6] * 8 + [0.05] * 32  # a few long tasks and many short ones
+
+    def run(place_by_speed):
+        monkeypatch.setattr(RemoteRun, "PLACE_BY_SPEED", place_by_speed)
+        fast = fake_agent(SECRET, workers=2, name="fast")
+        slow = fake_agent(SECRET, workers=2, slow=4.0, name="slow")
+        mesh = Mesh(workers=1, nodes=[fast.addr, slow.addr], secret=SECRET, speculative=False,
+                    mp_context=pool_context())  # fmt: skip
+        out, seconds = timed(lambda: mesh.map(sleep_for, durations, chunk_size=1, cost=float))
+        assert out == durations
+        return (
+            seconds,
+            [durations[i] for i in fast.received()],
+            [durations[i] for i in slow.received()],
+        )
+
+    t_on, on_fast, on_slow = run(True)
+    assert on_slow, "the slow laptop was never used, so nothing was tested"
+    assert 0.6 not in on_slow  # every long task went to a fast laptop
+    assert sum(on_fast) / len(on_fast) > sum(on_slow) / len(on_slow)
+    t_off, _, off_slow = run(False)
+    assert 0.6 in off_slow  # without the rule the slow laptop does get long tasks...
+    assert t_on < t_off - 0.5, (t_on, t_off)  # ...and the job takes clearly longer

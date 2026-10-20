@@ -66,6 +66,7 @@ DEFAULT_SECONDS_PER_UNIT = 1.0  # before anything is measured (the old fixed est
 TARGET_OVERHEAD = 0.10  # aim for network time <= 10% of compute time
 MAX_BATCH = 32
 MEMORY_RECHECK_S = 1.0
+FAST_TOLERANCE = 0.15  # laptops within 15% of the fastest count as "fast" for placement
 
 
 @dataclass
@@ -146,6 +147,8 @@ def _explicit_keys(nodes: list[str]) -> set[str]:
 
 
 class RemoteRun:
+    PLACE_BY_SPEED = True  # longest chunks to the fastest laptop (tests switch it off)
+
     def __init__(
         self,
         mesh: Mesh,
@@ -238,6 +241,7 @@ class RemoteRun:
     def map(self, chunks: list[Chunk], job_id: str) -> list[Any]:
         self.total = len(chunks)
         self.units = {c.chunk_id: max(c.cost, 1e-9) for c in chunks}
+        self.has_cost = len({c.cost for c in chunks}) > 1
         self.queue.submit(chunks)
         ctx = self.mesh.mp_context or pool_context()
         pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=ctx)
@@ -452,9 +456,29 @@ class RemoteRun:
         )
 
     # -- local worker -----------------------------------------------------------------------
+    def _end_for(self, who: str) -> str:
+        """Which end of the pending queue (most expensive first) `who` should take from.
+
+        With cost= estimates, the most expensive chunks go to the fastest laptops and
+        slower ones get the cheap chunks, so the job doesn't end waiting on a big task
+        on a slow laptop. Before a remote laptop is measured it starts with cheap chunks
+        (they come back fast and measure it); this laptop starts with the expensive ones.
+        """
+        if not (self.has_cost and self.PLACE_BY_SPEED):
+            return "front"
+        mine = self.speed.per_unit(who)
+        if mine is None:
+            return "front" if who == "local" else "back"
+        measured = [self.speed.per_unit("local")]
+        measured += [
+            self.speed.per_unit(n.addr) for n in self.nodes if n.alive and n.ready and not n.skipped
+        ]
+        fastest = min(v for v in measured if v is not None)
+        return "front" if mine <= fastest * (1 + FAST_TOLERANCE) else "back"
+
     def _fill_local(self, pool: ProcessPoolExecutor) -> None:
         while len(self.local) < self.local_slots:
-            c = self.queue.lease("local")
+            c = self.queue.lease("local", end=self._end_for("local"))
             if c is None:
                 return
             self._submit_local(pool, c, backup=False)
@@ -486,12 +510,13 @@ class RemoteRun:
             if room <= 0:
                 continue
             size = self._batch_size(node, room)
+            end = self._end_for(node.addr)
             batch: list[Chunk] = []
             while len(batch) < size:
-                nxt = self.queue.peek()
+                nxt = self.queue.peek(end)
                 if nxt is None or not self._worth_sending(nxt, node):
                     break
-                c = self.queue.lease(node.addr)
+                c = self.queue.lease(node.addr, end=end)
                 assert c is not None
                 batch.append(c)
             if batch:
