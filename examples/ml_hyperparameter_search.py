@@ -26,7 +26,7 @@ def run(nodes):
     grid = DEMO.make_inputs("medium")
     mesh = Mesh(nodes=nodes) if nodes else Mesh()
     t0 = time.perf_counter()
-    results = mesh.map(DEMO.fn, grid, chunk_size=DEMO.chunk_size)
+    results = mesh.map(DEMO.fn, grid, chunk_size=DEMO.chunk_size, cost=DEMO.cost)
     elapsed = time.perf_counter() - t0
     return elapsed, len(grid), results, getattr(mesh, "last_stats", None)
 

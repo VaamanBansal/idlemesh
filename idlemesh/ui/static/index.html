@@ -58,7 +58,7 @@
       <p id="peer-note" class="note"></p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Address</th><th>Workers</th><th>Python</th><th>Lendable</th><th>Latency</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Address</th><th>Workers</th><th>Free RAM</th><th>Python</th><th>Lendable</th><th>Latency</th><th>Status</th><th></th></tr></thead>
           <tbody id="peers"></tbody>
         </table>
       </div>
@@ -92,11 +92,14 @@
         <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar"><div id="bar-fill"></div></div>
         <p class="muted"><span id="run-count"></span> · <span id="run-elapsed"></span></p>
         <ul id="per-node" class="per-node"></ul>
+        <p id="run-backups" class="muted" hidden></p>
+        <ul id="run-skipped" class="note info skipped" hidden></ul>
         <div id="run-result" hidden>
           <table class="result">
             <tbody id="result-rows"></tbody>
           </table>
           <p id="run-answer"></p>
+          <p id="run-warning" class="note warn" hidden></p>
         </div>
         <p id="run-error" class="note bad" hidden></p>
       </div>

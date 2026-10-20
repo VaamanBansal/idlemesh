@@ -26,6 +26,7 @@ class Demo:
     same: Callable[[list, list], bool]  # do two runs agree?
     requires: tuple[str, ...] = ()  # importable modules needed on every laptop
     install_hint: str = ""
+    cost: Callable[[Any], float] | None = None  # relative cost of one input (map(cost=))
 
     def available(self) -> tuple[bool, str]:
         missing = [m for m in self.requires if importlib.util.find_spec(m) is None]
