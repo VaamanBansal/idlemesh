@@ -222,7 +222,11 @@ function renderRun() {
   backups.hidden = !run.backups_launched;
   backups.textContent = `Backup tasks: ${run.backups_launched} launched, ${run.backups_won} won`;
   const skipped = $("run-skipped");
-  skipped.replaceChildren(...(run.skipped || []).map((s) => el("li", `Skipped ${s}`)));
+  const idle = run.skipped || [];
+  skipped.replaceChildren(
+    ...(idle.length ? [el("li", "Laptops that ran nothing:", "muted")] : []),
+    ...idle.map((s) => el("li", s)),
+  );
   skipped.hidden = !(run.skipped || []).length;
 
   const done = run.finished && !run.error;

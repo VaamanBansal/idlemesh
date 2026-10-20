@@ -27,6 +27,11 @@ class Demo:
     requires: tuple[str, ...] = ()  # importable modules needed on every laptop
     install_hint: str = ""
     cost: Callable[[Any], float] | None = None  # relative cost of one input (map(cost=))
+    combine: Callable[[list], list] | None = None  # map() results -> what summarize sees
+
+    def finish(self, results: list) -> list:
+        """Results of map() as summarize() and same() expect them."""
+        return self.combine(results) if self.combine else results
 
     def available(self) -> tuple[bool, str]:
         missing = [m for m in self.requires if importlib.util.find_spec(m) is None]

@@ -314,3 +314,26 @@ def test_warning_when_no_other_laptop_ran_any_work(ui, fake_agent):
     assert r["speedup"] is None  # a speedup would be meaningless here
     warning = "No other laptop ran any work — check Laptops found and the log"
     assert any(warning in line["message"] for line in state.log_buffer.lines)
+
+
+def test_laptops_that_ran_nothing_are_explained_on_the_page(ui, agent, fake_agent):
+    state, client = ui
+    state.local_workers = 1  # so the working laptop is sure to get chunks
+    addr, _ = agent(secret=SECRET)
+    wrong = fake_agent("a-different-secret", name="wrong-secret-laptop")
+    client.post("/api/setup", json={"secret": SECRET, "mesh": "default"})
+    client.post("/api/peers", json={"address": addr})
+    client.post("/api/peers", json={"address": wrong.addr})
+    wait_for(client, lambda s: {p["status"] for p in s["peers"]} == {"compatible", "noreply"})
+
+    run = {"demo": "backtest", "size": "small", "mode": "mesh"}
+    assert client.post("/api/run", json=run).status_code == 202
+    late = fake_agent(SECRET, name="late-laptop")
+    client.post("/api/peers", json={"address": late.addr})  # appears after the run started
+    r = wait_for(client, finished)["run"]
+    assert r["error"] is None
+    text = "\n".join(r["skipped"])
+    assert f"{wrong.addr}: not used: no reply: wrong secret or port blocked" in text
+    assert "late-laptop: joined after the run started" in text
+    port = addr.split(":")[1]
+    assert f"test-agent-{port}" not in text  # it ran chunks, so it isn't listed

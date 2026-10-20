@@ -66,6 +66,13 @@ DEFAULT_SECONDS_PER_UNIT = 1.0  # before anything is measured (the old fixed est
 TARGET_OVERHEAD = 0.10  # aim for network time <= 10% of compute time
 MAX_BATCH = 32
 MEMORY_RECHECK_S = 1.0
+NO_REPLY = "no reply (wrong secret, port blocked, or not running `idlemesh serve`)"
+NOT_LENDABLE = "not lendable at start of run (busy, or on battery without force)"
+NO_RAM = "busy: not enough free RAM"
+LOST_TO_BACKUPS = "its chunks were finished first by backup copies"
+NOT_NEEDED = "not needed: other laptops could finish every chunk sooner"
+STILL_CONNECTING = "joined after the run finished (still connecting)"
+FAST_TOLERANCE = 0.15  # laptops within 15% of the fastest count as "fast" for placement
 
 
 @dataclass
@@ -99,6 +106,9 @@ class _Node:
     ram_available: int | None = None
     mem_slots: float = math.inf  # concurrent chunks that fit in its RAM
     skipped: str | None = None  # why this node gets no work in this job
+    why: str | None = None  # latest reason it couldn't take work (reported if it ran nothing)
+    duplicate: bool = False  # a second connection to an agent we already use
+    sent: int = 0  # chunks (or backup copies) sent to it
     rtt: RttTracker = field(default_factory=RttTracker)
     bw: BandwidthTracker = field(default_factory=BandwidthTracker)
     pings: dict[str, float] = field(default_factory=dict)  # ping id -> sent at
@@ -146,6 +156,8 @@ def _explicit_keys(nodes: list[str]) -> set[str]:
 
 
 class RemoteRun:
+    PLACE_BY_SPEED = True  # longest chunks to the fastest laptop (tests switch it off)
+
     def __init__(
         self,
         mesh: Mesh,
@@ -220,6 +232,7 @@ class RemoteRun:
         n = self.queue.release_node(node.addr)
         self._forget_inflight(node)
         log.warning("node %s %s; requeued %d chunk(s)", node.label, why, n)
+        node.why = f"stopped answering during the run ({why})"
         self._close(node)
 
     def _forget_inflight(self, node: _Node) -> None:
@@ -238,6 +251,7 @@ class RemoteRun:
     def map(self, chunks: list[Chunk], job_id: str) -> list[Any]:
         self.total = len(chunks)
         self.units = {c.chunk_id: max(c.cost, 1e-9) for c in chunks}
+        self.has_cost = len({c.cost for c in chunks}) > 1
         self.queue.submit(chunks)
         ctx = self.mesh.mp_context or pool_context()
         pool = ProcessPoolExecutor(max_workers=self.mesh.workers, mp_context=ctx)
@@ -257,6 +271,7 @@ class RemoteRun:
                 pool.shutdown(wait=False, cancel_futures=True)
             self.queue.drop_job(job_id)
             self._publish_speeds()
+            self._explain_idle_nodes()
             self.mesh.last_stats = self.stats.copy()
         return results
 
@@ -269,6 +284,24 @@ class RemoteRun:
         if self.on_progress is not None:
             self._publish_speeds()
             self.on_progress(sum(self.stats.values()), self.total, self.stats.copy())
+
+    def _explain_idle_nodes(self) -> None:
+        """Every laptop that completed nothing gets a reason in stats.skipped; laptops that
+        did complete chunks are dropped from it (a skip earlier in the run was temporary)."""
+        explained: dict[str, str] = {}
+        for node in self.nodes:
+            if node.duplicate or self.stats.get(node.addr, 0) > 0:
+                continue
+            if node.why:
+                reason = node.why
+            elif not node.ready:
+                reason = STILL_CONNECTING if node.alive else NO_REPLY
+            elif node.sent:
+                reason = LOST_TO_BACKUPS
+            else:
+                reason = NOT_NEEDED
+            explained[node.short] = reason
+        self.stats.skipped = explained
 
     def _publish_speeds(self) -> None:
         mean_units = sum(self.units.values()) / max(len(self.units), 1)
@@ -416,6 +449,7 @@ class RemoteRun:
                 )
             if reason and not node.skipped:
                 node.skipped = reason
+                node.why = f"skipped: {reason}"
                 self.stats.skipped[node.short] = reason
                 log.warning("skipped %s: %s", node.short, reason)
             elif not reason and node.skipped:
@@ -452,9 +486,29 @@ class RemoteRun:
         )
 
     # -- local worker -----------------------------------------------------------------------
+    def _end_for(self, who: str) -> str:
+        """Which end of the pending queue (most expensive first) `who` should take from.
+
+        With cost= estimates, the most expensive chunks go to the fastest laptops and
+        slower ones get the cheap chunks, so the job doesn't end waiting on a big task
+        on a slow laptop. Before a remote laptop is measured it starts with cheap chunks
+        (they come back fast and measure it); this laptop starts with the expensive ones.
+        """
+        if not (self.has_cost and self.PLACE_BY_SPEED):
+            return "front"
+        mine = self.speed.per_unit(who)
+        if mine is None:
+            return "front" if who == "local" else "back"
+        measured = [self.speed.per_unit("local")]
+        measured += [
+            self.speed.per_unit(n.addr) for n in self.nodes if n.alive and n.ready and not n.skipped
+        ]
+        fastest = min(v for v in measured if v is not None)
+        return "front" if mine <= fastest * (1 + FAST_TOLERANCE) else "back"
+
     def _fill_local(self, pool: ProcessPoolExecutor) -> None:
         while len(self.local) < self.local_slots:
-            c = self.queue.lease("local")
+            c = self.queue.lease("local", end=self._end_for("local"))
             if c is None:
                 return
             self._submit_local(pool, c, backup=False)
@@ -486,12 +540,13 @@ class RemoteRun:
             if room <= 0:
                 continue
             size = self._batch_size(node, room)
+            end = self._end_for(node.addr)
             batch: list[Chunk] = []
             while len(batch) < size:
-                nxt = self.queue.peek()
+                nxt = self.queue.peek(end)
                 if nxt is None or not self._worth_sending(nxt, node):
                     break
-                c = self.queue.lease(node.addr)
+                c = self.queue.lease(node.addr, end=end)
                 assert c is not None
                 batch.append(c)
             if batch:
@@ -503,6 +558,7 @@ class RemoteRun:
         node.batches[bid] = _Batch([c.chunk_id for c in chunks], time.perf_counter(), len(payload))
         for c in chunks:
             node.inflight[c.chunk_id] = _Sent(bid, now, backup)
+        node.sent += len(chunks)
         node.sock.send_multipart(self.codec.encode(MsgType.RUN, bid, payload))
 
     # -- backups ------------------------------------------------------------------------------
@@ -575,6 +631,7 @@ class RemoteRun:
             self._update_ram(node, info.get("ram_total"), info.get("ram_available"))
             if not info.get("lendable", True):
                 node.paused_until = now + REFUSED_BACKOFF_S
+                node.why = NOT_LENDABLE
         elif msg.type is MsgType.RESULT:
             self._on_results(node, msg)
         elif msg.type is MsgType.BUSY:
@@ -622,6 +679,7 @@ class RemoteRun:
             requeued += self.queue.release_chunk(cid, node.addr)
         self._update_ram(node, node.ram_total, info.get("ram_available"))
         node.paused_until = now + BUSY_BACKOFF_S
+        node.why = NO_RAM
         log.info(
             "%s has no RAM for more tasks right now; requeued %d chunk(s), retrying in %.0fs",
             node.short,
@@ -637,6 +695,8 @@ class RemoteRun:
         node.ram_available = int(available)
         if self.memory:
             node.mem_slots = len(node.inflight) + node.ram_available // self.memory
+            if node.mem_slots < 1:
+                node.why = NO_RAM
 
     def _handshake(self, node: _Node, info: dict) -> bool:
         """First PONG: check versions, learn the agent's name. False = node not used."""
@@ -646,10 +706,13 @@ class RemoteRun:
         theirs = str(info.get("python", ""))
         if protocol != PROTOCOL_VERSION:
             self._warn_once(f"{node.addr}:proto", protocol_mismatch(node.label, protocol))
+            older = "older" if protocol < PROTOCOL_VERSION else "newer"
+            node.why = f"{older} IdleMesh (protocol {protocol}, you have {PROTOCOL_VERSION})"
             self._close(node)
             return False
         if theirs != python_version():
             self._warn_once(f"{node.addr}:py:{theirs}", python_mismatch(node.label, theirs))
+            node.why = f"Python {theirs}, you have {python_version()}"
             self._close(node)
             return False
         port = node.addr.rsplit(":", 1)[1]
@@ -657,6 +720,7 @@ class RemoteRun:
             same_agent = other.node_id == node.node_id and other.addr.rsplit(":", 1)[1] == port
             if other is not node and other.alive and other.ready and same_agent:
                 log.info("%s is the same agent as %s; using one connection", node.addr, other.addr)
+                node.duplicate = True
                 self._close(node)
                 return False
         node.ready = True
@@ -668,6 +732,7 @@ class RemoteRun:
         n = self.queue.release_node(node.addr)
         self._forget_inflight(node)
         node.paused_until = now + REFUSED_BACKOFF_S
+        node.why = NOT_LENDABLE
         log.info("node %s is busy; requeued %d chunk(s), retrying it later", node.label, n)
 
     def _raise_remote(self, node: _Node, chunk_id: str, err: dict) -> None:
@@ -695,6 +760,7 @@ class RemoteRun:
                         "`idlemesh serve`, or a different secret); running without it",
                         who,
                     )
+                    node.why = NO_REPLY
                     self._close(node)
                 continue
             if node.inflight:

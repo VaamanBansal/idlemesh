@@ -14,26 +14,35 @@ _RATES = [1e-3, 3e-3, 1e-2]
 
 #        (shapes, alphas, rates, CV folds, max iterations)
 _SIZES = {
-    "small": (_SHAPES[:2], _ALPHAS, _RATES[:1], 3, 200),  # 6 configurations
-    "medium": (_SHAPES, _ALPHAS, _RATES, 5, 300),  # 54 configurations, 270 models
-    "large": (_SHAPES, _ALPHAS, _RATES, 10, 300),  # 54 configurations, 540 models
+    "small": (_SHAPES[:2], _ALPHAS, _RATES[:1], 3, 200),  # 6 configurations x 3 folds = 18 tasks
+    "medium": (_SHAPES, _ALPHAS, _RATES, 5, 300),  # 54 configurations x 5 folds = 270 tasks
+    "large": (_SHAPES, _ALPHAS, _RATES, 10, 300),  # 54 configurations x 10 folds = 540 tasks
 }
+
+# One task is one (configuration, fold) pair: training a single model. That's ~10x more
+# tasks than one-configuration-per-task for the same total work, so a job no longer ends
+# waiting on one long task on a slow laptop. combine() puts the folds back together.
 
 
 def train_and_score(task):
-    """Train one network configuration and return its cross-validated accuracy."""
+    """Train one configuration on one cross-validation fold; return its test accuracy.
+
+    Uses the same split cross_val_score(cv=n) uses for a classifier (StratifiedKFold,
+    no shuffling), so the averaged folds equal cross_val_score's result exactly.
+    """
     import warnings
 
     from sklearn.datasets import load_digits
     from sklearn.exceptions import ConvergenceWarning
-    from sklearn.model_selection import cross_val_score
+    from sklearn.model_selection import StratifiedKFold
     from sklearn.neural_network import MLPClassifier
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
     from threadpoolctl import threadpool_limits
 
-    hidden, alpha, lr, cv, max_iter = task
+    hidden, alpha, lr, cv, max_iter, fold = task
     X, y = load_digits(return_X_y=True)
+    train, test = list(StratifiedKFold(n_splits=cv).split(X, y))[fold]
     model = make_pipeline(
         StandardScaler(),
         MLPClassifier(
@@ -47,21 +56,40 @@ def train_and_score(task):
     # One thread per task: IdleMesh already runs one task per CPU core.
     with threadpool_limits(1), warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
-        scores = cross_val_score(model, X, y, cv=cv)
-    return hidden, alpha, lr, float(scores.mean())
+        model.fit(X[train], y[train])
+        score = model.score(X[test], y[test])
+    return hidden, alpha, lr, fold, float(score)
 
 
 def cost(task) -> float:
-    """Relative training time. Measured on the 54 medium configurations (10-87 s each):
+    """Relative training time of one fold. Measured on the 54 medium configurations:
     time grows with the number of hidden units and falls with the learning rate (a higher
     rate converges sooner); alpha made no difference."""
-    hidden, _alpha, lr, cv, max_iter = task
-    return (sum(hidden) / lr) ** 0.4 * cv * max_iter / 300
+    hidden, _alpha, lr, _cv, max_iter, _fold = task
+    return (sum(hidden) / lr) ** 0.4 * max_iter / 300
 
 
 def make_inputs(size: str) -> list[tuple]:
     shapes, alphas, rates, cv, max_iter = _SIZES[size]
-    return [(h, a, r, cv, max_iter) for h, a, r in itertools.product(shapes, alphas, rates)]
+    return [
+        (h, a, r, cv, max_iter, fold)
+        for h, a, r in itertools.product(shapes, alphas, rates)
+        for fold in range(cv)
+    ]
+
+
+def combine(results: list[tuple]) -> list[tuple]:
+    """Fold scores -> one (hidden, alpha, lr, mean accuracy) per configuration, in input
+    order. numpy's mean over the folds in fold order, as cross_val_score(...).mean()."""
+    import numpy as np
+
+    folds: dict[tuple, dict[int, float]] = {}
+    for hidden, alpha, lr, fold, score in results:
+        folds.setdefault((hidden, alpha, lr), {})[fold] = score
+    return [
+        (*config, float(np.array([scores[f] for f in sorted(scores)]).mean()))
+        for config, scores in folds.items()
+    ]
 
 
 def summarize(results: list[tuple]) -> dict:
@@ -98,6 +126,7 @@ def _demo():
         requires=("sklearn", "threadpoolctl"),
         install_hint="pip install scikit-learn on every laptop",
         cost=cost,
+        combine=combine,
     )
 
 

@@ -38,6 +38,14 @@ NO_REPLY_AFTER_S = 2.5  # a ping unanswered this long marks the laptop "no reply
 NO_REMOTE_WORK = "No other laptop ran any work — check Laptops found and the log"
 
 
+def _why_not_used(peer: dict) -> str:
+    """Reason a laptop in Laptops found wasn't given to a run, from its status badge."""
+    return {
+        "checking": "still being checked when the run started",
+        "unknown": "secret not set when the run started",
+    }.get(peer["status"], peer["reason"])
+
+
 def _per_laptop_rows(stats, labels: dict[str, str]) -> list[dict]:
     """Chunks done and measured seconds per chunk, per laptop, for the progress panel."""
     spc = getattr(stats, "seconds_per_chunk", {})
@@ -388,10 +396,19 @@ class UIState:
             raise UIError(f"{demo.title} isn't available: {why}.")
         nodes: list[str] = []
         labels = {"local": "this laptop"}
+        not_used: list[str] = []
+        seen_at_start: set[str] = set()
         if mode != "local":
             if not self._secret:
                 raise UIError("Enter the shared secret first.")
-            peers = [p for p in self._peer_rows() if p["status"] == "compatible"]
+            rows = self._peer_rows()
+            peers = [p for p in rows if p["status"] == "compatible"]
+            not_used = [
+                f"{p['name'] or p['address']}: not used: {_why_not_used(p)}"
+                for p in rows
+                if p["status"] not in ("compatible", "self")
+            ]
+            seen_at_start = {p["address"] for p in rows}
             if not peers:
                 raise UIError(
                     "No compatible laptops found yet. Check that the other laptop is lending "
@@ -421,7 +438,7 @@ class UIState:
                 "error": None,
                 "backups_launched": 0,
                 "backups_won": 0,
-                "skipped": [],
+                "skipped": list(not_used),
                 "no_remote_work": False,
                 "finished": False,
             }
@@ -429,14 +446,14 @@ class UIState:
         secret = self._secret
         thread = threading.Thread(
             target=self._execute,
-            args=(run, demo, nodes, labels, secret),
+            args=(run, demo, nodes, labels, secret, not_used, seen_at_start),
             name="idlemesh-ui-run",
             daemon=True,
         )
         thread.start()
         log.info("Running %s (%s, %s).", demo.title, size, mode)
 
-    def _execute(self, run, demo, nodes, labels, secret) -> None:
+    def _execute(self, run, demo, nodes, labels, secret, not_used, seen_at_start) -> None:
         from idlemesh.sdk import Mesh
 
         phases = {"local": ["local"], "mesh": ["mesh"], "compare": ["local", "mesh"]}[run["mode"]]
@@ -456,7 +473,8 @@ class UIState:
                             per_node=rows,
                             backups_launched=getattr(stats, "backups_launched", 0),
                             backups_won=getattr(stats, "backups_won", 0),
-                            skipped=[
+                            skipped=not_used
+                            + [
                                 f"{who}: {why}"
                                 for who, why in getattr(stats, "skipped", {}).items()
                             ],
@@ -477,6 +495,7 @@ class UIState:
                     cost=demo.cost,
                 )
                 seconds = time.perf_counter() - t0
+                results = demo.finish(results)  # e.g. ML: fold scores -> one per model
                 outputs[phase] = results
                 summary = demo.summarize(results)
                 remote_chunks = sum(v for k, v in mesh.last_stats.items() if k != "local")
@@ -489,6 +508,15 @@ class UIState:
                         "per_node": list(run["per_node"]),
                     }
                     run["answer"] = summary["answer"]
+                    if phase == "mesh":
+                        # Every laptop in Laptops found that ran nothing gets a reason.
+                        late = [
+                            f"{p['name'] or p['address']}: joined after the run started"
+                            for p in self._peer_rows()
+                            if p["address"] not in seen_at_start and p["status"] != "self"
+                        ]
+                        ran_nothing = [f"{w}: {why}" for w, why in mesh.last_stats.skipped.items()]
+                        run["skipped"] = not_used + ran_nothing + late
                     if phase == "mesh" and remote_chunks == 0:
                         run["no_remote_work"] = True
                 where = "on this laptop" if phase == "local" else "with found laptops"
