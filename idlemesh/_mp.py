@@ -17,3 +17,23 @@ def pool_context() -> BaseContext:
     if ctx.get_start_method() == "fork":
         return multiprocessing.get_context("forkserver")
     return ctx
+
+
+def terminate_pool(pool) -> None:
+    """Shut a ProcessPoolExecutor down now, killing workers still running a task.
+
+    Used for losing backup copies, which would otherwise keep a core busy after
+    map() returns. Python 3.14 has terminate_workers(); before that the executor's
+    process list is private, so this is best effort.
+    """
+    terminate = getattr(pool, "terminate_workers", None)
+    if terminate is not None:
+        terminate()
+        return
+    processes = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for proc in processes:
+        try:
+            proc.kill()
+        except Exception:
+            pass

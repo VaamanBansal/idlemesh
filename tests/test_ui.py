@@ -213,7 +213,11 @@ def test_mesh_mode_without_compatible_laptops_explains_why(ui):
 
 def test_second_run_while_one_is_running_is_refused(ui):
     _, client = ui
-    first = {"demo": "backtest", "size": "medium", "mode": "local"}
+    first = {
+        "demo": "backtest",
+        "size": "small",
+        "mode": "local",
+    }  # starting a pool alone takes longer than the second request
     assert client.post("/api/run", json=first).status_code == 202
     again = {"demo": "option", "size": "small", "mode": "local"}
     assert client.post("/api/run", json=again).status_code == 409
