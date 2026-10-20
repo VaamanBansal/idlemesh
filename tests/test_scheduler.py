@@ -239,3 +239,33 @@ def test_longest_tasks_go_to_the_fastest_laptop(fake_agent, monkeypatch):
     t_off, _, off_slow = run(False)
     assert 0.6 in off_slow  # without the rule the slow laptop does get long tasks...
     assert t_on < t_off - 0.5, (t_on, t_off)  # ...and the job takes clearly longer
+
+
+# -- laptops that ran nothing get a reason ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "knobs, inputs, reason",
+    [
+        ({"busy": True}, 30, "busy: not enough free RAM"),
+        ({"lendable": False}, 30, "not lendable at start of run"),
+        ({"silent": True}, 30, "its chunks were finished first by backup copies"),
+        ({}, 2, "not needed: other laptops could finish every chunk sooner"),
+        ({"secret": "a-different-secret"}, 30, "no reply (wrong secret"),
+    ],
+    ids=["busy", "not-lendable", "silent", "not-needed", "wrong-secret"],
+)
+def test_every_laptop_that_ran_nothing_gets_a_reason(fake_agent, knobs, inputs, reason):
+    knobs = dict(knobs)
+    idle = fake_agent(knobs.pop("secret", SECRET), name="idle-laptop", **knobs)
+    helper = fake_agent(SECRET, workers=2, name="helper")
+    mesh = Mesh(workers=2, nodes=[idle.addr, helper.addr], secret=SECRET, handshake_timeout=1.0,
+                mp_context=pool_context())  # fmt: skip
+    out = mesh.map(functools.partial(nap, 0.05), range(inputs), chunk_size=1)
+    assert out == [x * x for x in range(inputs)]
+    stats = mesh.last_stats
+    assert stats.get(idle.addr, 0) == 0
+    who = idle.addr if "secret" in reason else "idle-laptop"  # no handshake, so no name
+    assert reason in stats.skipped.get(who, ""), stats.skipped
+    for laptop, chunks in stats.items():
+        assert laptop not in stats.skipped or chunks == 0  # only laptops that ran nothing

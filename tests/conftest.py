@@ -86,11 +86,13 @@ class FakeAgent:
     ram:        bytes reported as available
     busy:       reply BUSY to every RUN
     silent:     answer PINGs but never return results
+    lendable:   what the PONG says (False = owner busy or on battery)
     Records every batch received in `batches` (lists of chunk indexes).
     """
 
     def __init__(self, secret, workers=2, delay=0.0, jitter=None, bandwidth=None, slow=1.0,
-                 ram=16 * 1024**3, busy=False, silent=False, name="fake-agent"):  # fmt: skip
+                 ram=16 * 1024**3, busy=False, silent=False, name="fake-agent",
+                 lendable=True):  # fmt: skip
         import itertools
         import uuid
 
@@ -102,6 +104,7 @@ class FakeAgent:
         self.workers, self.delay, self.bandwidth, self.slow = workers, delay, bandwidth, slow
         self.jitter = itertools.cycle(jitter or [0.0])
         self.ram, self.busy, self.silent, self.name = ram, busy, silent, name
+        self.lendable = lendable
         self.node_id = uuid.uuid4().hex[:12]
         self.batches: list[list[int]] = []
         self.runs = 0  # RUN messages received
@@ -165,7 +168,8 @@ class FakeAgent:
                 ident, *frames = self.sock.recv_multipart()
                 msg = self.codec.decode(frames)
                 if msg is not None and msg.type is MsgType.PING:
-                    info = {"workers": self.workers, "lendable": True, "python": python_version(),
+                    info = {"workers": self.workers, "lendable": self.lendable,
+                            "python": python_version(),
                             "protocol": PROTOCOL_VERSION, "name": self.name,
                             "node_id": self.node_id, "ram_total": self.ram,
                             "ram_available": self.ram}  # fmt: skip
