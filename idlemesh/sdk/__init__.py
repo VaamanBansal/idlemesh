@@ -18,16 +18,21 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
+import psutil
+
 from idlemesh.coordinator.queue import ChunkQueue
 from idlemesh.coordinator.scheduler import Scheduler
-from idlemesh.protocol import Chunk, dumps, loads, parse_node, split
+from idlemesh.protocol import Chunk, dumps, format_bytes, loads, parse_memory, parse_node, split
+from idlemesh.sdk.stats import RunStats
 
 if TYPE_CHECKING:
+    from multiprocessing.context import BaseContext
+
     from idlemesh.agent.discovery import Browser
     from idlemesh.sdk.discover import Discovery
 
 
-ProgressCallback = Callable[[int, int, dict[str, int]], None]  # (done, total, per_node)
+ProgressCallback = Callable[[int, int, RunStats], None]  # (done, total, per_node)
 
 
 def _run_serialized(blob: bytes) -> list[Any]:
@@ -52,8 +57,13 @@ class Mesh:
         mesh: str | None = None,
         discover_timeout: float = 2.0,
         browser: Browser | None = None,
+        mp_context: BaseContext | None = None,
+        speculative: bool = True,
     ) -> None:
         """
+        mp_context: multiprocessing context for the local worker pool. None keeps
+            Python's default for local-only runs (remote runs always use a fork-safe
+            one); pass idlemesh._mp.pool_context() when calling from a threaded process.
         nodes: "host[:port]" of agents started with `idlemesh serve` (port defaults to 7450).
         discover: also find agents on the LAN over mDNS, before and during each map().
         mesh: only use discovered agents in this mesh (default: $IDLEMESH_MESH or "default").
@@ -65,6 +75,10 @@ class Mesh:
         handshake_timeout: give up on a node that hasn't answered the first PING.
         chunk_timeout: optionally release a node holding one chunk longer than this.
         remote_slowdown_limit: skip a node whose estimated cost exceeds local by this factor.
+        speculative: near the end of a job, run backup copies of slow remote chunks on idle
+            workers and keep whichever finishes first. Turn it off (False) if your function
+            has side effects (writes files, sends emails, charges cards): with backups, a
+            chunk can run twice.
         """
         self.workers = workers or os.cpu_count() or 2
         self.queue = ChunkQueue()
@@ -85,6 +99,8 @@ class Mesh:
         self.chunk_timeout = chunk_timeout
         self.scheduler = scheduler or Scheduler()
         self.remote_slowdown_limit = remote_slowdown_limit
+        self.mp_context = mp_context
+        self.speculative = speculative
         self.last_stats: dict[str, int] = {}  # node -> chunks it completed in the last map()
 
     def discovery(self) -> Discovery:
@@ -123,23 +139,46 @@ class Mesh:
         inputs: list[Any],
         chunk_size: int = 100,
         on_progress: ProgressCallback | None = None,
+        cost: Callable[[Any], float] | None = None,
+        memory: int | str | None = None,
     ) -> list[Any]:
         """Apply `fn` to every input; results come back in input order.
 
         on_progress(done, total, per_node) is called after each chunk completes, with
-        chunk counts; per_node maps "local" or a node's "host:port" to chunks it ran.
+        chunk counts; per_node (a RunStats) maps "local" or a node's "host:port" to the
+        chunks it ran, and carries backups and measured seconds per chunk.
+        cost(input) -> float estimates how expensive an input is relative to others;
+            the most expensive chunks are started first, so long tasks don't finish last.
+        memory: RAM one task needs ("512MB", "4GB" or bytes). Each laptop only runs as
+            many tasks at once as fit in its free RAM; if none can fit one, map() raises
+            MemoryError before running anything.
         """
+        need = parse_memory(memory)
+        job_id = uuid.uuid4().hex[:8]
+        items = list(inputs)
+        chunks = split(job_id, fn, items, chunk_size)
+        if cost is not None:
+            for c in chunks:
+                c.cost = max(float(sum(cost(x) for x in c.inputs)), 1e-9)
+            chunks.sort(key=lambda c: c.cost, reverse=True)  # .index keeps input order
         if self.nodes or self.discover:
             try:
                 from idlemesh.sdk.remote import RemoteRun
             except ImportError as err:
                 raise ImportError("remote nodes need pyzmq: pip install 'idlemesh[net]'") from err
             discovery = self.discovery() if self.discover else None
-            return RemoteRun(self, discovery, on_progress).map(fn, inputs, chunk_size)
-        job_id = uuid.uuid4().hex[:8]
-        chunks = split(job_id, fn, list(inputs), chunk_size)
+            return RemoteRun(self, discovery, on_progress, memory=need).map(chunks, job_id)
+        workers = self.workers
+        if need:
+            free = psutil.virtual_memory().available
+            workers = min(workers, free // need)
+            if workers < 1:
+                raise MemoryError(
+                    f"This laptop can't fit one task needing {format_bytes(need)}: "
+                    f"{format_bytes(free)} free. Lower memory= or free some RAM."
+                )
         self.queue.submit(chunks)
-        with ProcessPoolExecutor(max_workers=self.workers) as pool:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=self.mp_context) as pool:
             futures = {}
             while (c := self.queue.lease("local")) is not None:
                 futures[c.chunk_id] = pool.submit(_run_serialized, dumps(c))
@@ -150,7 +189,7 @@ class Mesh:
                 cids = {fut: cid for cid, fut in futures.items()}
                 for done, fut in enumerate(as_completed(cids), start=1):
                     self.queue.complete(cids[fut], fut.result())
-                    on_progress(done, len(chunks), {"local": done})
+                    on_progress(done, len(chunks), RunStats({"local": done}))
         return self.queue.gather(job_id)
 
 

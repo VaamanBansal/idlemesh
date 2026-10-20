@@ -63,6 +63,12 @@ function setConnected(ok) {
 }
 
 // ---------------------------------------------------------------- rendering
+function fmtBytes(n) {
+  if (n === null || n === undefined) return "?";
+  const gb = n / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(n / 1024 ** 2)} MB`;
+}
+
 function fmtSeconds(s) {
   if (s === null || s === undefined) return "-";
   return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
@@ -122,6 +128,7 @@ function renderPeers() {
       el("td", p.name ?? "?"),
       el("td", p.address),
       el("td", p.workers ?? "?"),
+      el("td", fmtBytes(p.ram_free)),
       el("td", p.python ?? "?"),
       el("td", p.lendable === null ? "?" : p.lendable ? "yes" : "no"),
       el("td", p.rtt_ms === null ? "-" : `${p.rtt_ms} ms`),
@@ -205,8 +212,18 @@ function renderRun() {
   for (const n of run.per_node) {
     const li = el("li");
     li.append(el("span", `${n.label}: `), el("strong", n.count));
+    if (n.seconds_per_chunk !== null && n.seconds_per_chunk !== undefined) {
+      li.append(el("span", ` (${n.seconds_per_chunk.toFixed(2)} s/chunk)`, "muted"));
+    }
     list.append(li);
   }
+
+  const backups = $("run-backups");
+  backups.hidden = !run.backups_launched;
+  backups.textContent = `Backup tasks: ${run.backups_launched} launched, ${run.backups_won} won`;
+  const skipped = $("run-skipped");
+  skipped.replaceChildren(...(run.skipped || []).map((s) => el("li", `Skipped ${s}`)));
+  skipped.hidden = !(run.skipped || []).length;
 
   const done = run.finished && !run.error;
   $("run-result").hidden = !done;
@@ -220,9 +237,14 @@ function renderRun() {
     };
     if (run.results.local) add("This laptop only", fmtSeconds(run.results.local.seconds));
     if (run.results.mesh) add("With found laptops", fmtSeconds(run.results.mesh.seconds));
-    if (run.speedup !== null) add("Speedup", `${run.speedup}×`);
+    if (run.speedup !== null && !run.no_remote_work) add("Speedup", `${run.speedup}×`);
     if (run.match !== null) add("Results", run.match ? "✓ results match" : "✗ results differ");
     $("run-answer").textContent = run.answer || "";
+    const warning = $("run-warning");
+    warning.hidden = !run.no_remote_work;
+    warning.textContent = run.no_remote_work
+      ? "No other laptop ran any work — check Laptops found and the log"
+      : "";
   }
   const err = $("run-error");
   err.hidden = !run.error;

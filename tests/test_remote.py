@@ -119,3 +119,36 @@ def test_on_progress_counts_per_node_with_remote_agent(agent):
     assert all(total == 20 for _, total, _ in calls)
     assert all(sum(per_node.values()) == done for done, _, per_node in calls)
     assert calls[-1][2] == mesh.last_stats and calls[-1][2].get(addr, 0) > 0
+
+
+def test_real_agent_runs_batches_and_replies_busy_when_ram_is_short(agent):
+    import zmq
+
+    from idlemesh.protocol import dumps, loads, pack_run, split, unpack_results
+
+    addr, _ = agent()
+    codec = Codec(SECRET)
+    sock = zmq.Context.instance().socket(zmq.DEALER)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(f"tcp://{addr}")
+    try:
+        chunks = split("j", slow_square, [2, 3, 4], chunk_size=1)
+        batch = pack_run(0, [(c.chunk_id, dumps(c)) for c in chunks])
+        sock.send_multipart(codec.encode(MsgType.RUN, "batch-1", batch))
+        assert sock.poll(20_000)
+        msg = codec.decode(sock.recv_multipart())
+        assert msg.type is MsgType.RESULT and msg.chunk_id == "batch-1"
+        agent_seconds, replies = unpack_results(msg.payload)
+        got = {r.chunk_id: loads(r.blob) for r in replies if r.ok}
+        assert got == {c.chunk_id: [c.inputs[0] ** 2] for c in chunks}
+        assert all(r.seconds >= 0.05 for r in replies)  # each chunk's own compute time
+        assert agent_seconds >= max(r.seconds for r in replies)
+
+        too_big = pack_run(1024**5, [(chunks[0].chunk_id, dumps(chunks[0]))])  # 1 PB
+        sock.send_multipart(codec.encode(MsgType.RUN, "batch-2", too_big))
+        assert sock.poll(10_000)
+        msg = codec.decode(sock.recv_multipart())
+        assert msg.type is MsgType.BUSY and msg.chunk_id == "batch-2"
+        assert loads(msg.payload)["ram_available"] > 0
+    finally:
+        sock.close()

@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from idlemesh._mp import pool_context
 from idlemesh.agent.discovery import (
     AgentAdvert,
     Browser,
@@ -32,6 +33,23 @@ log = logging.getLogger("idlemesh.ui")
 
 MESH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 NO_REPLY_AFTER_S = 2.5  # a ping unanswered this long marks the laptop "no reply"
+
+
+NO_REMOTE_WORK = "No other laptop ran any work — check Laptops found and the log"
+
+
+def _per_laptop_rows(stats, labels: dict[str, str]) -> list[dict]:
+    """Chunks done and measured seconds per chunk, per laptop, for the progress panel."""
+    spc = getattr(stats, "seconds_per_chunk", {})
+    keys = list(dict.fromkeys([*stats.keys(), *spc.keys()]))
+    return [
+        {
+            "label": labels.get(k, k),
+            "count": stats.get(k, 0),
+            "seconds_per_chunk": round(spc[k], 3) if k in spc else None,
+        }
+        for k in keys
+    ]
 
 
 class UIError(Exception):
@@ -62,6 +80,8 @@ class ProbeResult:
     python: str | None = None
     protocol: int | None = None
     workers: int | None = None
+    ram_total: int | None = None
+    ram_available: int | None = None
     rtt_ms: float | None = None
     pinged_at: float | None = None  # monotonic time of the oldest unanswered ping
     replied_at: float | None = None
@@ -293,6 +313,8 @@ class UIState:
                             python=info.get("python"),
                             protocol=int(info.get("protocol", 1)),
                             workers=info.get("workers"),
+                            ram_total=info.get("ram_total"),
+                            ram_available=info.get("ram_available"),
                             rtt_ms=(time.perf_counter() - sent)
                             * 1000,  # monotonic ticks ~15 ms on Windows
                             replied_at=time.monotonic(),
@@ -345,6 +367,8 @@ class UIState:
                     "address": addr,
                     "name": p.name if secret_set else None,
                     "workers": p.workers or (adv.workers if adv else None),
+                    "ram_free": p.ram_available if secret_set else None,
+                    "ram_total": p.ram_total if secret_set else None,
                     "python": python,
                     "lendable": p.lendable if secret_set else None,
                     "rtt_ms": round(p.rtt_ms, 1) if p.rtt_ms is not None and secret_set else None,
@@ -395,6 +419,10 @@ class UIState:
                 "match": None,
                 "answer": None,
                 "error": None,
+                "backups_launched": 0,
+                "backups_won": 0,
+                "skipped": [],
+                "no_remote_work": False,
                 "finished": False,
             }
             self._run = run
@@ -419,34 +447,60 @@ class UIState:
                 with self._lock:
                     run.update(phase=phase, done=0, total=0, per_node=[], phase_started=time.time())
 
-                def progress(done, total, per_node):
-                    rows = [{"label": labels.get(k, k), "count": v} for k, v in per_node.items()]
+                def progress(done, total, stats):
+                    rows = _per_laptop_rows(stats, labels)
                     with self._lock:
-                        run.update(done=done, total=total, per_node=rows)
+                        run.update(
+                            done=done,
+                            total=total,
+                            per_node=rows,
+                            backups_launched=getattr(stats, "backups_launched", 0),
+                            backups_won=getattr(stats, "backups_won", 0),
+                            skipped=[
+                                f"{who}: {why}"
+                                for who, why in getattr(stats, "skipped", {}).items()
+                            ],
+                        )
 
                 w = self.local_workers
-                mesh = Mesh(w) if phase == "local" else Mesh(w, nodes=nodes, secret=secret)
+                ctx = pool_context()  # fork-safe: this process runs server/prober/agent threads
+                if phase == "local":
+                    mesh = Mesh(w, mp_context=ctx)
+                else:
+                    mesh = Mesh(w, nodes=nodes, secret=secret, mp_context=ctx)
                 t0 = time.perf_counter()
                 results = mesh.map(
-                    demo.fn, inputs, chunk_size=demo.chunk_size, on_progress=progress
+                    demo.fn,
+                    inputs,
+                    chunk_size=demo.chunk_size,
+                    on_progress=progress,
+                    cost=demo.cost,
                 )
                 seconds = time.perf_counter() - t0
                 outputs[phase] = results
                 summary = demo.summarize(results)
+                remote_chunks = sum(v for k, v in mesh.last_stats.items() if k != "local")
                 with self._lock:
+                    if phase == "mesh" and mesh.last_stats:
+                        run["per_node"] = _per_laptop_rows(mesh.last_stats, labels)
                     run["results"][phase] = {
                         "seconds": round(seconds, 2),
                         "answer": summary["answer"],
                         "per_node": list(run["per_node"]),
                     }
                     run["answer"] = summary["answer"]
+                    if phase == "mesh" and remote_chunks == 0:
+                        run["no_remote_work"] = True
                 where = "on this laptop" if phase == "local" else "with found laptops"
                 log.info("%s %s took %.1fs.", demo.title, where, seconds)
+                if phase == "mesh" and remote_chunks == 0:
+                    log.warning(NO_REMOTE_WORK)
             if len(outputs) == 2:
                 local_s = run["results"]["local"]["seconds"]
                 mesh_s = run["results"]["mesh"]["seconds"]
                 with self._lock:
-                    run["speedup"] = round(local_s / mesh_s, 2) if mesh_s > 0 else None
+                    if not run["no_remote_work"]:
+                        run["speedup"] = round(local_s / mesh_s, 2) if mesh_s > 0 else None
                     run["match"] = demo.same(outputs["local"], outputs["mesh"])
                 if not run["match"]:
                     log.warning("Results from the mesh run differ from the local run.")

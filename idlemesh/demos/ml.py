@@ -51,6 +51,14 @@ def train_and_score(task):
     return hidden, alpha, lr, float(scores.mean())
 
 
+def cost(task) -> float:
+    """Relative training time. Measured on the 54 medium configurations (10-87 s each):
+    time grows with the number of hidden units and falls with the learning rate (a higher
+    rate converges sooner); alpha made no difference."""
+    hidden, _alpha, lr, cv, max_iter = task
+    return (sum(hidden) / lr) ** 0.4 * cv * max_iter / 300
+
+
 def make_inputs(size: str) -> list[tuple]:
     shapes, alphas, rates, cv, max_iter = _SIZES[size]
     return [(h, a, r, cv, max_iter) for h, a, r in itertools.product(shapes, alphas, rates)]
@@ -89,6 +97,7 @@ def _demo():
         same=same,
         requires=("sklearn", "threadpoolctl"),
         install_hint="pip install scikit-learn on every laptop",
+        cost=cost,
     )
 
 

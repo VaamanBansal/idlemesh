@@ -17,38 +17,60 @@ import time
 import traceback
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass, field
 from typing import Any
 
+import psutil
 import zmq
 
 from idlemesh._mp import pool_context
 from idlemesh.agent.discovery import Advertiser, AgentAdvert, make_advert, node_id
 from idlemesh.agent.idle import IdleMonitor
-from idlemesh.protocol import PROTOCOL_VERSION, Codec, MsgType, dumps, loads, python_version
+from idlemesh.protocol import (
+    PROTOCOL_VERSION,
+    ChunkReply,
+    Codec,
+    MsgType,
+    dumps,
+    format_bytes,
+    loads,
+    pack_results,
+    python_version,
+    unpack_run,
+)
 
 log = logging.getLogger(__name__)
 
 LENDABLE_RECHECK_S = 10.0
 
 
-def _run_blob(blob: bytes) -> tuple[bool, bytes]:
-    """Runs in a pool worker: unpickle a chunk, run it, return pickled results or error."""
+def _run_blob(blob: bytes) -> tuple[bool, bytes, float]:
+    """Runs in a pool worker: unpickle a chunk, run it, return (ok, pickled results or
+    error, compute seconds)."""
+    t0 = time.perf_counter()
     try:
         chunk = loads(blob)
-        return True, dumps(chunk.run())
+        return True, dumps(chunk.run()), time.perf_counter() - t0
     except BaseException as exc:  # noqa: BLE001 - report everything back to the caller
         try:
             exc_blob = dumps(exc)
         except Exception:
             exc_blob = None
-        return False, dumps(
-            {
-                "kind": "exception",
-                "message": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
-                "exc": exc_blob,
-            }
-        )
+        err = {
+            "kind": "exception",
+            "message": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
+            "exc": exc_blob,
+        }
+        return False, dumps(err), time.perf_counter() - t0
+
+
+@dataclass
+class _Batch:
+    ident: bytes
+    received: float  # perf_counter when the RUN arrived
+    expected: int
+    replies: list[ChunkReply] = field(default_factory=list)
 
 
 def _noop() -> None:
@@ -87,7 +109,8 @@ class Agent:
         self._pool: ProcessPoolExecutor | None = None
         self._pool_gen = 0
         # future -> (router identity, chunk_id, pool generation)
-        self._running: dict[Future, tuple[bytes, str, int]] = {}
+        self._running: dict[Future, tuple[str, str, int]] = {}  # -> (batch, chunk, pool gen)
+        self._batches: dict[str, _Batch] = {}
 
     def advert(self) -> AgentAdvert:
         """What this agent broadcasts over mDNS. Deliberately excludes name and lendable."""
@@ -174,6 +197,7 @@ class Agent:
             return
         if msg.type is MsgType.PING:
             self._check_peer_python(msg.payload)
+            ram = psutil.virtual_memory()
             info = {
                 "workers": self.workers,
                 "lendable": self.lendable(),
@@ -181,16 +205,38 @@ class Agent:
                 "protocol": PROTOCOL_VERSION,
                 "name": self.name,
                 "node_id": self.node_id,
+                "ram_total": ram.total,
+                "ram_available": ram.available,
             }
             self._send(sock, ident, MsgType.PONG, msg.chunk_id, info)
         elif msg.type is MsgType.RUN:
-            if not self.lendable():
-                log.info("refusing chunk %s: machine is not lendable", msg.chunk_id)
-                refusal = {"kind": "refused", "message": "machine is busy or on battery"}
-                self._send(sock, ident, MsgType.ERROR, msg.chunk_id, refusal)
-                return
-            self._running[self._submit(msg.payload)] = (ident, msg.chunk_id, self._pool_gen)
-        # RESULT / ERROR / PONG are client-bound; ignore them here.
+            self._run(sock, ident, msg.chunk_id, msg.payload)
+        # RESULT / ERROR / PONG / BUSY are client-bound; ignore them here.
+
+    def _run(self, sock: zmq.Socket, ident: bytes, batch_id: str, payload: bytes) -> None:
+        if not self.lendable():
+            log.info("refusing batch %s: machine is not lendable", batch_id)
+            refusal = {"kind": "refused", "message": "machine is busy or on battery"}
+            self._send(sock, ident, MsgType.ERROR, batch_id, refusal)
+            return
+        try:
+            memory, chunks = unpack_run(payload)  # framing only: nothing is unpickled here
+        except ValueError:
+            log.warning("dropped malformed RUN %s", batch_id)
+            return
+        available = psutil.virtual_memory().available
+        if memory and available < memory * len(chunks):
+            log.info(
+                "batch %s needs %s, only %s free: replying BUSY",
+                batch_id,
+                format_bytes(memory * len(chunks)),
+                format_bytes(available),
+            )
+            self._send(sock, ident, MsgType.BUSY, batch_id, {"ram_available": available})
+            return
+        self._batches[batch_id] = _Batch(ident, time.perf_counter(), len(chunks))
+        for cid, blob in chunks:
+            self._running[self._submit(blob)] = (batch_id, cid, self._pool_gen)
 
     def _check_peer_python(self, payload: bytes) -> None:
         """Warn (once per version) when a client on another Python pings us.
@@ -212,21 +258,30 @@ class Agent:
 
     def _reap(self, sock: zmq.Socket) -> None:
         for fut in [f for f in self._running if f.done()]:
-            ident, cid, gen = self._running.pop(fut)
+            batch_id, cid, gen = self._running.pop(fut)
             exc = fut.exception()
             if exc is None:
-                ok, blob = fut.result()
+                ok, blob, seconds = fut.result()
                 self.chunks_served += ok
-                mtype = MsgType.RESULT if ok else MsgType.ERROR
-                sock.send_multipart([ident, *self.codec.encode(mtype, cid, blob)])
+                reply = ChunkReply(cid, ok, blob, seconds)
+            else:
+                if isinstance(exc, BrokenProcessPool) and gen == self._pool_gen:
+                    log.warning("a worker process died; restarting the pool")
+                    self._new_pool()
+                crash = {
+                    "kind": "crash",
+                    "message": f"worker process died while running chunk {cid}: {exc!r}",
+                    "traceback": "",
+                    "exc": None,
+                }
+                reply = ChunkReply(cid, False, dumps(crash), 0.0)
+            batch = self._batches.get(batch_id)
+            if batch is None:
                 continue
-            if isinstance(exc, BrokenProcessPool) and gen == self._pool_gen:
-                log.warning("a worker process died; restarting the pool")
-                self._new_pool()
-            crash = {
-                "kind": "crash",
-                "message": f"worker process died while running chunk {cid}: {exc!r}",
-                "traceback": "",
-                "exc": None,
-            }
-            self._send(sock, ident, MsgType.ERROR, cid, crash)
+            batch.replies.append(reply)
+            if len(batch.replies) == batch.expected:
+                del self._batches[batch_id]
+                elapsed = time.perf_counter() - batch.received
+                payload = pack_results(elapsed, batch.replies)
+                frames = self.codec.encode(MsgType.RESULT, batch_id, payload)
+                sock.send_multipart([batch.ident, *frames])

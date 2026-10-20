@@ -38,7 +38,7 @@ import cloudpickle
 log = logging.getLogger(__name__)
 
 MAX_AGE_S = 300.0  # reject messages more than 5 minutes old (or in the future)
-PROTOCOL_VERSION = 2  # 1 = Phase 1 (no versions in the handshake); 2 = Phase 2
+PROTOCOL_VERSION = 3  # 1 = Phase 1; 2 = Phase 2 (versions in handshake); 3 = batches, BUSY, RAM
 DEFAULT_PORT = 7450
 
 _HOSTNAME = re.compile(
@@ -88,6 +88,7 @@ class Chunk:
     payload_bytes: int = 0
     chunk_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     attempts: int = 0
+    cost: float = 1.0  # relative cost from map(cost=...); bigger chunks are dispatched first
 
     def run(self) -> list[Any]:
         return [self.fn(x) for x in self.inputs]
@@ -126,6 +127,7 @@ class MsgType(str, Enum):
     ERROR = "ERROR"
     PING = "PING"
     PONG = "PONG"
+    BUSY = "BUSY"  # agent can't fit the batch in RAM right now; client requeues it (v3)
 
 
 @dataclass
@@ -133,6 +135,117 @@ class Message:
     type: MsgType
     chunk_id: str
     payload: bytes
+
+
+# -- memory -----------------------------------------------------------------------
+_UNITS = {"": 1, "B": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
+_MEMORY = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGTP]?)(?:I?B)?\s*$", re.IGNORECASE)
+
+
+def parse_memory(value: int | float | str | None) -> int:
+    """RAM one task needs, in bytes: 4_000_000_000, "512MB", "4GB", "1.5 GiB" (units of 1024)."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        raise ValueError(f"memory must be bytes or a string like '4GB', not {value!r}")
+    if isinstance(value, int | float):
+        if value < 0:
+            raise ValueError("memory can't be negative")
+        return int(value)
+    m = _MEMORY.match(str(value))
+    if not m:
+        raise ValueError(f"can't read memory {value!r}: use bytes or e.g. '512MB', '4GB'")
+    return int(float(m.group(1)) * _UNITS[m.group(2).upper()])
+
+
+def format_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+# -- batched RUN / RESULT payloads (v3) -------------------------------------------------
+# Plain length-prefixed framing, so the agent can read the memory requirement and split
+# a batch without unpickling anything in its main process.
+
+
+@dataclass
+class ChunkReply:
+    chunk_id: str
+    ok: bool
+    blob: bytes  # pickled results, or a pickled error dict when not ok
+    seconds: float  # compute time inside the worker
+
+
+class _Reader:
+    def __init__(self, data: bytes) -> None:
+        self.data, self.pos = data, 0
+
+    def take(self, n: int) -> bytes:
+        if n < 0 or self.pos + n > len(self.data):
+            raise ValueError("truncated payload")
+        out = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return out
+
+    def unpack(self, fmt: str) -> tuple:
+        return struct.unpack(fmt, self.take(struct.calcsize(fmt)))
+
+    def text(self) -> str:
+        (n,) = self.unpack(">H")
+        return self.take(n).decode()
+
+    def blob(self) -> bytes:
+        (n,) = self.unpack(">Q")
+        return self.take(n)
+
+    def done(self) -> None:
+        if self.pos != len(self.data):
+            raise ValueError("trailing bytes in payload")
+
+
+def _text(s: str) -> bytes:
+    b = s.encode()
+    return struct.pack(">H", len(b)) + b
+
+
+def pack_run(memory: int, chunks: list[tuple[str, bytes]]) -> bytes:
+    """RUN payload: memory per task (bytes, 0 = not given), then (chunk_id, chunk blob)s."""
+    parts = [struct.pack(">QI", memory, len(chunks))]
+    for cid, blob in chunks:
+        parts += [_text(cid), struct.pack(">Q", len(blob)), blob]
+    return b"".join(parts)
+
+
+def unpack_run(payload: bytes) -> tuple[int, list[tuple[str, bytes]]]:
+    r = _Reader(payload)
+    memory, n = r.unpack(">QI")
+    chunks = [(r.text(), r.blob()) for _ in range(n)]
+    r.done()
+    return memory, chunks
+
+
+def pack_results(agent_seconds: float, replies: list[ChunkReply]) -> bytes:
+    """RESULT payload: the agent's time from receiving the batch to replying, then one
+    reply per chunk (its own compute time lets the client separate network from work)."""
+    parts = [struct.pack(">dI", agent_seconds, len(replies))]
+    for r in replies:
+        parts += [_text(r.chunk_id), struct.pack(">?dQ", r.ok, r.seconds, len(r.blob)), r.blob]
+    return b"".join(parts)
+
+
+def unpack_results(payload: bytes) -> tuple[float, list[ChunkReply]]:
+    r = _Reader(payload)
+    agent_seconds, n = r.unpack(">dI")
+    replies = []
+    for _ in range(n):
+        cid = r.text()
+        ok, seconds, size = r.unpack(">?dQ")
+        replies.append(ChunkReply(cid, ok, r.take(size), seconds))
+    r.done()
+    return agent_seconds, replies
 
 
 class RemoteError(RuntimeError):

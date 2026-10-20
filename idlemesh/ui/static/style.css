@@ -67,6 +67,8 @@ button.link { border: none; background: none; color: var(--accent); padding: 0 4
 .note.ok { color: var(--ok); }
 .note.bad { color: var(--bad); }
 .note.info { background: var(--info-bg); padding: 6px 10px; border-radius: 6px; }
+.note.warn { background: var(--warn-bg); color: var(--warn); padding: 6px 10px; border-radius: 6px; }
+ul.skipped { list-style: none; margin: 8px 0 0; }
 .pill { font-size: 12px; padding: 2px 10px; border-radius: 99px; background: var(--warn-bg); color: var(--warn); }
 .pill.ok { background: var(--ok-bg); color: var(--ok); }
 .table-wrap { overflow-x: auto; margin-top: 10px; }

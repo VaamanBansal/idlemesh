@@ -20,6 +20,7 @@ IdleMesh has three roles. Any laptop can play any of them.
   ```
 
   With a predictor attached, a remote node's cost becomes `time / P(stays idle)`, the expected time including retries if the node gets reclaimed (geometric model). A small `risk_floor` stops a single unlucky estimate from excluding a node forever.
+- **Measurements and backups** (`coordinator/speed.py`, `sdk/remote.py`): per-laptop compute seconds per unit of cost (from the agent's own timings), RTT mean and p90 from continuous pings (unanswered pings count at their age), and bandwidth from bytes over transfer time. They size batches (network <= 10% of compute), stop prefetching once pending chunks no longer outnumber all workers, keep end-of-job chunks where they finish soonest, and drive backup copies: a chunk can be leased to two places and the first result wins (`ChunkQueue.lease_backup`). Protocol 3 carries batches, the RAM a task needs, and BUSY.
 - **Ledger** (`coordinator/ledger.py`): compute-seconds donated minus compute-seconds borrowed. Priority is proportional to balance, with a floor so nobody starves.
 
 ## Testing UI

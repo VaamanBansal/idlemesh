@@ -199,7 +199,7 @@ def test_local_demo_reaches_100_percent_and_reports_results(ui):
     r = wait_for(client, finished)["run"]
     assert r["error"] is None
     assert r["total"] > 0 and r["done"] == r["total"]
-    assert r["per_node"] == [{"label": "this laptop", "count": r["total"]}]
+    assert [(n["label"], n["count"]) for n in r["per_node"]] == [("this laptop", r["total"])]
     assert r["results"]["local"]["seconds"] > 0
     assert "Option price" in r["answer"] and "Black-Scholes" in r["answer"]
 
@@ -213,7 +213,11 @@ def test_mesh_mode_without_compatible_laptops_explains_why(ui):
 
 def test_second_run_while_one_is_running_is_refused(ui):
     _, client = ui
-    first = {"demo": "backtest", "size": "medium", "mode": "local"}
+    first = {
+        "demo": "backtest",
+        "size": "small",
+        "mode": "local",
+    }  # starting a pool alone takes longer than the second request
     assert client.post("/api/run", json=first).status_code == 202
     again = {"demo": "option", "size": "small", "mode": "local"}
     assert client.post("/api/run", json=again).status_code == 409
@@ -272,3 +276,41 @@ def test_token_survives_restart(isolated_home):
     first = load_token()
     assert len(first) >= 32 and load_token() == first
     assert (isolated_home / "ui_token").exists()
+
+
+def test_ui_runs_use_a_fork_safe_pool(ui, monkeypatch):
+    """The UI process runs threads, so its worker pools must never use fork()."""
+    import idlemesh.sdk
+
+    contexts = []
+    real_mesh = idlemesh.sdk.Mesh
+
+    def spy(*args, **kwargs):
+        contexts.append(kwargs.get("mp_context"))
+        return real_mesh(*args, **kwargs)
+
+    monkeypatch.setattr(idlemesh.sdk, "Mesh", spy)
+    _, client = ui
+    client.post("/api/run", json={"demo": "option", "size": "small", "mode": "local"})
+    wait_for(client, finished)
+    assert contexts and all(c is not None for c in contexts)
+    assert all(c.get_start_method() != "fork" for c in contexts)
+
+
+def test_warning_when_no_other_laptop_ran_any_work(ui, fake_agent):
+    state, _ = ui
+    _, client = ui
+    silent = fake_agent(SECRET, silent=True, ram=6 * 1024**3, name="silent-laptop")
+    client.post("/api/setup", json={"secret": SECRET, "mesh": "default"})
+    client.post("/api/peers", json={"address": silent.addr})
+    s = wait_for(client, lambda s: s["peers"] and s["peers"][0]["status"] == "compatible")
+    assert s["peers"][0]["ram_free"] == 6 * 1024**3  # the new free-RAM column
+
+    run = {"demo": "option", "size": "small", "mode": "compare"}
+    assert client.post("/api/run", json=run).status_code == 202
+    r = wait_for(client, finished)["run"]
+    assert r["error"] is None and r["match"] is True
+    assert r["no_remote_work"] is True
+    assert r["speedup"] is None  # a speedup would be meaningless here
+    warning = "No other laptop ran any work — check Laptops found and the log"
+    assert any(warning in line["message"] for line in state.log_buffer.lines)
