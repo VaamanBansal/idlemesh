@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("zmq")
 
 from idlemesh import Mesh  # noqa: E402
+from idlemesh._mp import pool_context  # noqa: E402
 from idlemesh.protocol import split  # noqa: E402
 from idlemesh.sdk.remote import RemoteRun, _Node  # noqa: E402
 
@@ -58,7 +59,8 @@ def test_slow_laptop_never_makes_the_job_meaningfully_slower(fake_agent):
     work = functools.partial(nap, 0.2)
     inputs = list(range(16))
     expected = [x * x for x in inputs]
-    alone, t_alone = timed(lambda: Mesh(workers=2).map(work, inputs, chunk_size=1))
+    local_only = Mesh(workers=2, mp_context=pool_context())  # no fork() in a threaded process
+    alone, t_alone = timed(lambda: local_only.map(work, inputs, chunk_size=1))
     slow = fake_agent(SECRET, workers=2, slow=10.0)  # 2 s per task instead of 0.2 s
     mesh = Mesh(workers=2, nodes=[slow.addr], secret=SECRET)
     out, t_mesh = timed(lambda: mesh.map(work, inputs, chunk_size=1))
@@ -98,9 +100,9 @@ def test_speed_tracking_converges_for_fast_and_slow_laptops(fake_agent):
     mesh = Mesh(workers=1, nodes=[fast.addr, slow.addr], secret=SECRET, speculative=False)
     mesh.map(functools.partial(nap, 0.05), range(60), chunk_size=1)
     spc = mesh.last_stats.seconds_per_chunk
-    assert 0.04 < spc[fast.addr] < 0.09, spc
-    assert 0.15 < spc[slow.addr] < 0.30, spc
-    assert 2.5 < spc[slow.addr] / spc[fast.addr] < 6, spc
+    # Ratios, not absolute times: CI runners (macOS especially) overshoot short sleeps.
+    assert 0.6 < spc[fast.addr] / spc["local"] < 1.6, spc  # same 1x work as this laptop
+    assert 2.5 < spc[slow.addr] / spc[fast.addr] < 6, spc  # 4x slower laptop
 
 
 def test_prefetch_only_while_plenty_of_work_remains():
@@ -121,7 +123,8 @@ def test_prefetch_only_while_plenty_of_work_remains():
 
 def test_cost_dispatches_expensive_first_and_keeps_input_order():
     inputs = [3, 9, 1, 7, 5]
-    out = Mesh(workers=1).map(started_at, inputs, chunk_size=1, cost=lambda x: x)
+    mesh = Mesh(workers=1, mp_context=pool_context())  # no fork() in a threaded process
+    out = mesh.map(started_at, inputs, chunk_size=1, cost=lambda x: x)
     assert [x for x, _ in out] == inputs  # results in input order
     by_start = [x for x, _ in sorted(out, key=lambda r: r[1])]
     assert by_start == sorted(inputs, reverse=True)  # executed most expensive first
